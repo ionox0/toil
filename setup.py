@@ -84,12 +84,12 @@ def runSetup():
         all_reqs.remove(htcondor)
 
     setup(
-        name='toil',
+        name='toil-ionox0',
         version=version.distVersion,
         description='Pipeline management software for clusters.',
         author='Benedict Paten',
-        author_email='benedict@soe.usc.edu',
-        url="https://github.com/BD2KGenomics/toil",
+        author_email='ionox0@gmail.com',
+        url="https://github.com/ionox0/toil",
         classifiers=["License :: OSI Approved :: Apache Software License"],
         license="Apache License v2.0",
         install_requires=[
