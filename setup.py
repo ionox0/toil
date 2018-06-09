@@ -85,7 +85,7 @@ def runSetup():
 
     setup(
         name='toil-ionox0',
-        version=version.distVersion,
+        version='0.0.1',
         description='Pipeline management software for clusters.',
         author='Benedict Paten',
         author_email='ionox0@gmail.com',
