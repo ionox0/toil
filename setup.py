@@ -85,11 +85,11 @@ def runSetup():
 
     setup(
         name='toil-ionox0',
-        version='0.0.1',
+        version='0.0.5',
         description='Pipeline management software for clusters.',
         author='Benedict Paten',
         author_email='ionox0@gmail.com',
-        url="https://github.com/ionox0/toil",
+        url="https://github.com/ionox0/toil/tree/ij/toil-ionox0",
         classifiers=["License :: OSI Approved :: Apache Software License"],
         license="Apache License v2.0",
         install_requires=[
