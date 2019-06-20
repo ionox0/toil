@@ -72,7 +72,7 @@ def apply_conf_file(fn, conf_filename):
 
 def per_core_reserve_from_stream(stream):
     for k, v in tokenize_conf_stream(stream):
-        if k == "RESOURCE_RESERVE_PER_SLOT":
+        if k in {"RESOURCE_RESERVE_PER_SLOT", "RESOURCE_RESERVE_PER_TASK"}:
             return v.upper()
     return None
 
@@ -100,7 +100,7 @@ def apply_bparams(fn):
     """
     cmd = ["bparams", "-a"]
     try:
-        output = subprocess.check_output(cmd)
+        output = subprocess.check_output(cmd).decode('utf-8')
     except:
         return None
     return fn(output.split("\n"))
@@ -111,7 +111,7 @@ def apply_lsadmin(fn):
     """
     cmd = ["lsadmin", "showconf", "lim"]
     try:
-        output = subprocess.check_output(cmd)
+        output = subprocess.check_output(cmd).decode('utf-8')
     except:
         return None
     return fn(output.split("\n"))
@@ -199,5 +199,5 @@ def convert_mb(kb, unit):
 
 
 if __name__ == "__main__":
-    print (get_lsf_units())
-    print (per_core_reservation())
+    print(get_lsf_units())
+    print(per_core_reservation())

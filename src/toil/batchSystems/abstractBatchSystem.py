@@ -1,4 +1,4 @@
-# Copyright (C) 2015-2016 Regents of the University of California
+# Copyright (C) 2015-2018 Regents of the University of California
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -11,12 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-
 from __future__ import absolute_import
-
 from future import standard_library
 standard_library.install_aliases()
+from future.utils import with_metaclass
 from builtins import object
 import os
 import shutil
@@ -25,17 +23,17 @@ from abc import ABCMeta, abstractmethod
 from collections import namedtuple
 from contextlib import contextmanager
 
-from bd2k.util.objects import abstractclassmethod
-
+from toil.lib.objects import abstractclassmethod
 from toil.batchSystems import registry
 from toil.common import Toil, cacheDirName
 from toil.fileStore import shutdownFileStore
-from future.utils import with_metaclass
+
 try:
     from toil.cwl.cwltoil import CWL_INTERNAL_JOBS
 except ImportError:
     # CWL extra not installed
     CWL_INTERNAL_JOBS = ()
+
 logger = logging.getLogger(__name__)
 
 
@@ -110,7 +108,8 @@ class AbstractBatchSystem(with_metaclass(ABCMeta, object)):
     @abstractmethod
     def killBatchJobs(self, jobIDs):
         """
-        Kills the given job IDs.
+        Kills the given job IDs. After returning, the killed jobs will not
+        appear in the results of getRunningBatchJobIDs.
 
         :param jobIDs: list of IDs of jobs to kill
         :type jobIDs: list[int]
@@ -316,7 +315,8 @@ class BatchSystemLocalSupport(BatchSystemSupport):
         Returns the jobID if the jobNode has been submitted to the local queue,
         otherwise returns None
         """
-        if jobNode.jobName.startswith(CWL_INTERNAL_JOBS):
+        if (not self.config.runCwlInternalJobsOnWorkers
+                and jobNode.jobName.startswith(CWL_INTERNAL_JOBS)):
             return self.localBatch.issueBatchJob(jobNode)
         else:
             return None

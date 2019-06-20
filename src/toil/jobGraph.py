@@ -1,4 +1,4 @@
-# Copyright (C) 2015-2016 Regents of the University of California
+# Copyright (C) 2015-2018 Regents of the University of California
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,7 +16,7 @@ import logging
 
 from toil.job import JobNode
 
-logger = logging.getLogger( __name__ )
+logger = logging.getLogger(__name__)
 
 
 class JobGraph(JobNode):
@@ -27,10 +27,15 @@ class JobGraph(JobNode):
     class and should therefore only be held in memory for brief periods of time.
     """
     def __init__(self, command, memory, cores, disk, unitName, jobName, preemptable,
-                 jobStoreID, remainingRetryCount, predecessorNumber,
-                 filesToDelete=None, predecessorsFinished=None,
-                 stack=None, services=None,
-                 startJobStoreID=None, terminateJobStoreID=None,
+                 jobStoreID,
+                 remainingRetryCount,
+                 predecessorNumber,
+                 filesToDelete=None,
+                 predecessorsFinished=None,
+                 stack=None,
+                 services=None,
+                 startJobStoreID=None,
+                 terminateJobStoreID=None,
                  errorJobStoreID=None,
                  logJobStoreFileID=None,
                  checkpoint=None,
@@ -95,6 +100,9 @@ class JobGraph(JobNode):
         # this job
         self.chainedJobs = chainedJobs
 
+    def __hash__(self):
+        return hash(self.jobStoreID)
+
     def setupJobAfterFailure(self, config):
         """
         Reduce the remainingRetryCount if greater than zero and set the memory
@@ -123,7 +131,7 @@ class JobGraph(JobNode):
         """
         assert self.checkpoint is not None
         successorsDeleted = []
-        if len(self.stack) > 0 or len(self.services) > 0 or self.command != None:
+        if self.stack or self.services or self.command != None:
             if self.command != None:
                 assert self.command == self.checkpoint
                 logger.debug("Checkpoint job already has command set to run")
@@ -133,7 +141,7 @@ class JobGraph(JobNode):
             jobStore.update(self) # Update immediately to ensure that checkpoint
             # is made before deleting any remaining successors
 
-            if len(self.stack) > 0 or len(self.services) > 0:
+            if self.stack or self.services:
                 # If the subtree of successors is not complete restart everything
                 logger.debug("Checkpoint job has unfinished successor jobs, deleting the jobs on the stack: %s, services: %s " %
                              (self.stack, self.services))
@@ -162,11 +170,11 @@ class JobGraph(JobNode):
                 jobStore.update(self)
         return successorsDeleted
 
-    def getLogFileHandle( self, jobStore ):
+    def getLogFileHandle(self, jobStore):
         """
         Returns a context manager that yields a file handle to the log file
         """
-        return jobStore.readFileStream( self.logJobStoreFileID )
+        return jobStore.readFileStream(self.logJobStoreFileID)
 
     @classmethod
     def fromJobNode(cls, jobNode, jobStoreID, tryCount):

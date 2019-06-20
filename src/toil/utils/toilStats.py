@@ -29,7 +29,7 @@ from toil.lib.bioio import getBasicOptionParser
 from toil.lib.bioio import parseBasicOptions
 from toil.common import Toil, jobStoreLocatorHelp, Config
 from toil.version import version
-from bd2k.util.expando import Expando
+from toil.lib.expando import Expando
 
 logger = logging.getLogger( __name__ )
 
@@ -92,8 +92,7 @@ def initializeOptions(parser):
 def checkOptions(options, parser):
     """ Check options, throw parser.error() if something goes wrong
     """
-    logger.info("Parsed arguments")
-    logger.info("Checking if we have files for toil")
+
     if options.jobStore == None:
         parser.error("Specify --jobStore")
     defaultCategories = ["time", "clock", "wait", "memory"]
@@ -117,7 +116,6 @@ def checkOptions(options, parser):
         if (options.sortField not in sortFields):
             parser.error("Unknown --sortField %s. Must be from %s"
                          % (options.sortField, str(sortFields)))
-    logger.info("Checked arguments")
 
 def printJson(elem):
     """ Return a JSON formatted string
@@ -304,7 +302,7 @@ def sprintTag(key, tag, options, columnWidths=None):
             (tag.max_memory, columnWidths.getWidth("memory", "max")),
             (tag.total_memory, columnWidths.getWidth("memory", "total")),
             ]:
-            tag_str += reportMemory(t, options, field=width, isBytes=True)
+            tag_str += reportMemory(t, options, field=width)
     out_str += header + "\n"
     out_str += sub_header + "\n"
     out_str += tag_str + "\n"
@@ -454,9 +452,9 @@ def buildElement(element, items, itemName):
     itemClocks = []
     itemMemory = []
     for item in items:
-        itemTimes.append(assertNonnegative(item["time"], "time"))
-        itemClocks.append(assertNonnegative(item["clock"], "clock"))
-        itemMemory.append(assertNonnegative(item["memory"], "memory"))
+        itemTimes.append(assertNonnegative(float(item["time"]), "time"))
+        itemClocks.append(assertNonnegative(float(item["clock"]), "clock"))
+        itemMemory.append(assertNonnegative(float(item["memory"]), "memory"))
     assert len(itemClocks) == len(itemTimes) == len(itemMemory)
 
     itemWaits=[]
@@ -534,14 +532,15 @@ def getStats(jobStore):
 
 
 def processData(config, stats):
-    ##########################################
-    # Collate the stats and report
-    ##########################################
-    if stats.get("total_time", None) is None:  # Hack to allow unfinished toils.
-        stats.total_time = {"total_time": "0.0", "total_clock": "0.0"}
-    else:
-        stats.total_time = sum([float(number) for number in stats.total_time])
-        stats.total_clock = sum([float(number) for number in stats.total_clock])
+    """
+    Collate the stats and report
+    """
+    if 'total_time' not in stats:  # toil job not finished yet
+        stats.total_time = [0.0]
+        stats.total_clock = [0.0]
+
+    stats.total_time = sum([float(number) for number in stats.total_time])
+    stats.total_clock = sum([float(number) for number in stats.total_clock])
 
     collatedStatsTag = Expando(total_run_time=stats.total_time,
                                total_clock=stats.total_clock,

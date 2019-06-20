@@ -14,15 +14,23 @@
 import logging
 import os
 from collections import namedtuple
+from difflib import get_close_matches
 from operator import attrgetter
 import datetime
 from toil.lib.misc import std_dev, mean
+from six import string_types
 
 from toil.test import runningOnEC2
 
 logger = logging.getLogger(__name__)
 
 ZoneTuple = namedtuple('ZoneTuple', ['name', 'price_deviation'])
+
+
+def zoneToRegion(zone):
+    """Get a region (e.g. us-west-2) from a zone (e.g. us-west-1c)."""
+    from toil.lib.context import Context
+    return Context.availability_zone_re.match(zone).group(1)
 
 
 def getSpotZone(spotBid, nodeType, ctx):
@@ -76,39 +84,33 @@ def choose_spot_zone(zones, bid, spot_history):
     :return: the name of the selected zone
 
     >>> from collections import namedtuple
-    >>> FauxHistory = namedtuple( 'FauxHistory', [ 'price', 'availability_zone' ] )
-    >>> ZoneTuple = namedtuple( 'ZoneTuple', [ 'name' ] )
-
-    >>> zones = [ ZoneTuple( 'us-west-2a' ), ZoneTuple( 'us-west-2b' ) ]
-    >>> spot_history = [ FauxHistory( 0.1, 'us-west-2a' ), \
-                         FauxHistory( 0.2,'us-west-2a'), \
-                         FauxHistory( 0.3,'us-west-2b'), \
-                         FauxHistory( 0.6,'us-west-2b')]
-    >>> # noinspection PyProtectedMember
-    >>> choose_spot_zone( zones, 0.15, spot_history )
+    >>> FauxHistory = namedtuple('FauxHistory', ['price', 'availability_zone'])
+    >>> ZoneTuple = namedtuple('ZoneTuple', ['name'])
+    >>> zones = [ZoneTuple('us-west-2a'), ZoneTuple('us-west-2b')]
+    >>> spot_history = [FauxHistory(0.1, 'us-west-2a'), \
+                        FauxHistory(0.2, 'us-west-2a'), \
+                        FauxHistory(0.3, 'us-west-2b'), \
+                        FauxHistory(0.6, 'us-west-2b')]
+    >>> choose_spot_zone(zones, 0.15, spot_history)
     'us-west-2a'
 
-    >>> spot_history=[ FauxHistory( 0.3, 'us-west-2a' ), \
-                       FauxHistory( 0.2, 'us-west-2a' ), \
-                       FauxHistory( 0.1, 'us-west-2b'), \
-                       FauxHistory( 0.6, 'us-west-2b') ]
-    >>> # noinspection PyProtectedMember
+    >>> spot_history=[FauxHistory(0.3, 'us-west-2a'), \
+                      FauxHistory(0.2, 'us-west-2a'), \
+                      FauxHistory(0.1, 'us-west-2b'), \
+                      FauxHistory(0.6, 'us-west-2b')]
     >>> choose_spot_zone(zones, 0.15, spot_history)
     'us-west-2b'
 
-    >>> spot_history={ FauxHistory( 0.1, 'us-west-2a' ), \
-                       FauxHistory( 0.7, 'us-west-2a' ), \
-                       FauxHistory( 0.1, "us-west-2b" ), \
-                       FauxHistory( 0.6, 'us-west-2b' ) }
-    >>> # noinspection PyProtectedMember
+    >>> spot_history=[FauxHistory(0.1, 'us-west-2a'), \
+                      FauxHistory(0.7, 'us-west-2a'), \
+                      FauxHistory(0.1, 'us-west-2b'), \
+                      FauxHistory(0.6, 'us-west-2b')]
     >>> choose_spot_zone(zones, 0.15, spot_history)
     'us-west-2b'
-   """
-
-    # Create two lists of tuples of form: [ (zone.name, std_deviation), ... ] one for zones
+    """
+    # Create two lists of tuples of form: [(zone.name, std_deviation), ...] one for zones
     # over the bid price and one for zones under bid price. Each are sorted by increasing
     # standard deviation values.
-    #
     markets_under_bid, markets_over_bid = [], []
     for zone in zones:
         zone_histories = [zone_history for zone_history in spot_history if zone_history.availability_zone == zone.name]
@@ -120,8 +122,7 @@ def choose_spot_zone(zones, bid, spot_history):
         zone_tuple = ZoneTuple(name=zone.name, price_deviation=price_deviation)
         (markets_over_bid, markets_under_bid)[recent_price < bid].append(zone_tuple)
 
-    return min(markets_under_bid or markets_over_bid,
-               key=attrgetter('price_deviation')).name
+    return min(markets_under_bid or markets_over_bid, key=attrgetter('price_deviation')).name
 
 
 def optimize_spot_bid(ctx, instance_type, spot_bid):
@@ -133,7 +134,7 @@ def optimize_spot_bid(ctx, instance_type, spot_bid):
         _check_spot_bid(spot_bid, spot_history)
     zones = ctx.ec2.get_all_zones()
     most_stable_zone = choose_spot_zone(zones, spot_bid, spot_history)
-    logger.info("Placing spot instances in zone %s.", most_stable_zone)
+    logger.debug("Placing spot instances in zone %s.", most_stable_zone)
     return most_stable_zone
 
 
@@ -169,6 +170,7 @@ def _check_spot_bid(spot_bid, spot_history):
         logger.warn("Your bid $ %f is more than double this instance type's average "
                  "spot price ($ %f) over the last week", spot_bid, average)
 
+
 def _get_spot_history(ctx, instance_type):
     """
     Returns list of 1,000 most recent spot market data points represented as SpotPriceHistory
@@ -197,123 +199,51 @@ iamFullPolicy = dict(Version="2012-10-17", Statement=[
     dict(Effect="Allow", Resource="*", Action="iam:*")])
 
 
-logDir = '--log_dir=/var/lib/mesos'
-leaderArgs = logDir + ' --registry=in_memory --cluster={name}'
-workerArgs = '{keyPath} --work_dir=/var/lib/mesos --master={ip}:5050 --attributes=preemptable:{preemptable} ' + logDir
+def checkValidNodeTypes(provisioner, nodeTypes):
+    """
+    Raises if an invalid nodeType is specified for aws, azure, or gce.
 
-awsUserData = """#cloud-config
-
-write_files:
-    - path: "/home/core/volumes.sh"
-      permissions: "0777"
-      owner: "root"
-      content: |
-        #!/bin/bash
-        set -x
-        ephemeral_count=0
-        drives=""
-        directories="toil mesos docker"
-        for drive in /dev/xvd{{b..z}} /dev/nvme*n*; do
-            echo checking for $drive
-            if [ -b $drive ]; then
-                echo found it
-                ephemeral_count=$((ephemeral_count + 1 ))
-                drives="$drives $drive"
-                echo increased ephemeral count by one
-            fi
-        done
-        if (("$ephemeral_count" == "0" )); then
-            echo no ephemeral drive
-            for directory in $directories; do
-                sudo mkdir -p /var/lib/$directory
-            done
-            exit 0
-        fi
-        sudo mkdir /mnt/ephemeral
-        if (("$ephemeral_count" == "1" )); then
-            echo one ephemeral drive to mount
-            sudo mkfs.ext4 -F $drives
-            sudo mount $drives /mnt/ephemeral
-        fi
-        if (("$ephemeral_count" > "1" )); then
-            echo multiple drives
-            for drive in $drives; do
-                dd if=/dev/zero of=$drive bs=4096 count=1024
-            done
-            sudo mdadm --create -f --verbose /dev/md0 --level=0 --raid-devices=$ephemeral_count $drives # determine force flag
-            sudo mkfs.ext4 -F /dev/md0
-            sudo mount /dev/md0 /mnt/ephemeral
-        fi
-        for directory in $directories; do
-            sudo mkdir -p /mnt/ephemeral/var/lib/$directory
-            sudo mkdir -p /var/lib/$directory
-            sudo mount --bind /mnt/ephemeral/var/lib/$directory /var/lib/$directory
-        done
-
-coreos:
-    update:
-      reboot-strategy: off
-    units:
-    - name: "volume-mounting.service"
-      command: "start"
-      content: |
-        [Unit]
-        Description=mounts ephemeral volumes & bind mounts toil directories
-        Author=cketchum@ucsc.edu
-        Before=docker.service
-
-        [Service]
-        Type=oneshot
-        Restart=no
-        ExecStart=/usr/bin/bash /home/core/volumes.sh
-
-    - name: "toil-{role}.service"
-      command: "start"
-      content: |
-        [Unit]
-        Description=toil-{role} container
-        Author=cketchum@ucsc.edu
-        After=docker.service
-
-        [Service]
-        Restart=on-failure
-        RestartSec=2
-        ExecPre=-/usr/bin/docker rm toil_{role}
-        ExecStart=/usr/bin/docker run \
-            --entrypoint={entrypoint} \
-            --net=host \
-            -v /var/run/docker.sock:/var/run/docker.sock \
-            -v /var/lib/mesos:/var/lib/mesos \
-            -v /var/lib/docker:/var/lib/docker \
-            -v /var/lib/toil:/var/lib/toil \
-            -v /var/lib/cwl:/var/lib/cwl \
-            -v /tmp:/tmp \
-            --name=toil_{role} \
-            {image} \
-            {args}
-    - name: "node-exporter.service"
-      command: "start"
-      content: |
-        [Unit]
-        Description=node-exporter container
-        After=docker.service
-
-        [Service]
-        Restart=on-failure
-        RestartSec=2
-        ExecPre=-/usr/bin/docker rm node_exporter
-        ExecStart=/usr/bin/docker run \
-            -p 9100:9100 \
-            -v /proc:/host/proc \
-            -v /sys:/host/sys \
-            -v /:/rootfs \
-            --name node-exporter \
-            --restart always \
-            prom/node-exporter:v0.15.2 \
-            --path.procfs /host/proc \
-            --path.sysfs /host/sys \
-            --collector.filesystem.ignored-mount-points ^/(sys|proc|dev|host|etc)($|/)
-
-ssh_authorized_keys:
-    - "ssh-rsa {sshKey}"
-"""
+    :param str provisioner: 'aws', 'gce', or 'azure' to specify which cloud provisioner used.
+    :param nodeTypes: A list of node types.  Example: ['t2.micro', 't2.medium']
+    :return: Nothing.  Raises if invalid nodeType.
+    """
+    if not nodeTypes:
+        return
+    if not isinstance(nodeTypes, list):
+        nodeTypes = [nodeTypes]
+    if not isinstance(nodeTypes[0], string_types):
+        return
+    # check if a valid node type for aws
+    from toil.lib.generatedEC2Lists import E2Instances, regionDict
+    if provisioner == 'aws':
+        from toil.provisioners.aws import getCurrentAWSZone
+        currentZone = getCurrentAWSZone()
+        if not currentZone:
+            currentZone = 'us-west-2'
+        else:
+            currentZone = currentZone[:-1] # adds something like 'a' or 'b' to the end
+        # check if instance type exists in this region
+        for nodeType in nodeTypes:
+            if nodeType and ':' in nodeType:
+                nodeType = nodeType.split(':')[0]
+            if nodeType not in regionDict[currentZone]:
+                # They probably misspelled it and can't tell.
+                close = get_close_matches(nodeType, regionDict[currentZone], 1)
+                if len(close) > 0:
+                    helpText = ' Did you mean ' + close[0] + '?'
+                else:
+                    helpText = ''
+                raise RuntimeError('Invalid nodeType (%s) specified for AWS in region: %s.%s'
+                                   '' % (nodeType, currentZone, helpText))
+    # Only checks if aws nodeType specified for gce/azure atm.
+    if provisioner == 'gce' or provisioner == 'azure':
+        for nodeType in nodeTypes:
+            if nodeType and ':' in nodeType:
+                nodeType = nodeType.split(':')[0]
+            try:
+                E2Instances[nodeType]
+                raise RuntimeError("It looks like you've specified an AWS nodeType with the "
+                                   "{} provisioner.  Please specify an {} nodeType."
+                                   "".format(provisioner, provisioner))
+            except KeyError:
+                pass

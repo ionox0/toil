@@ -1,4 +1,4 @@
-# Copyright (C) 2015-2016 Regents of the University of California
+# Copyright (C) 2015-2018 Regents of the University of California
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -11,47 +11,44 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 from __future__ import absolute_import
 
 from builtins import object
 import logging
 
-logger = logging.getLogger( __name__ )
+logger = logging.getLogger(__name__)
 
-class ToilState( object ):
+
+class ToilState(object):
     """
     Represents a snapshot of the jobs in the jobStore. Used by the leader to manage the batch.
     """
-    def __init__( self, jobStore, rootJob, jobCache=None):
+    def __init__(self, jobStore, rootJob, jobCache=None):
         """
         Loads the state from the jobStore, using the rootJob 
         as the source of the job graph.
-        
+
         The jobCache is a map from jobStoreIDs to jobGraphs or None. Is used to
         speed up the building of the state.
-        
+
         :param toil.jobStores.abstractJobStore.AbstractJobStore jobStore 
         :param toil.jobWrapper.JobGraph rootJob
         """
         # This is a hash of jobs, referenced by jobStoreID, to their predecessor jobs.
-        self.successorJobStoreIDToPredecessorJobs = { }
+        self.successorJobStoreIDToPredecessorJobs = {}
         
         # Hash of jobStoreIDs to counts of numbers of successors issued.
-        # There are no entries for jobs
-        # without successors in this map.
-        self.successorCounts = { }
+        # There are no entries for jobs without successors in this map.
+        self.successorCounts = {}
 
         # This is a hash of service jobs, referenced by jobStoreID, to their predecessor job
-        self.serviceJobStoreIDToPredecessorJob = { }
+        self.serviceJobStoreIDToPredecessorJob = {}
 
-        # Hash of jobStoreIDs to maps of services issued for the job
-        # Each for job, the map is a dictionary of service jobStoreIDs
-        # to the flags used to communicate the with service
-        self.servicesIssued = { }
+        # Hash of jobStoreIDs mapping to services issued for the job
+        self.servicesIssued = {}
         
         # Jobs that are ready to be processed
-        self.updatedJobs = set( )
+        self.updatedJobs = set()
         
         # The set of totally failed jobs - this needs to be filtered at the
         # end to remove jobs that were removed by checkpoints
@@ -69,7 +66,6 @@ class ToilState( object ):
         self.jobsToBeScheduledWithMultiplePredecessors = {}
         
         ##Algorithm to build this information
-        logger.info("(Re)building internal scheduler state")
         self._buildToilState(rootJob, jobStore, jobCache)
 
     def _buildToilState(self, jobGraph, jobStore, jobCache=None):
@@ -80,23 +76,22 @@ class ToilState( object ):
         If jobCache is passed, it must be a dict from job ID to JobGraph
         object. Jobs will be loaded from the cache (which can be downloaded from
         the jobStore in a batch) instead of piecemeal when recursed into.
+
+        :param jobGraph: Object representing a job.
+        :param jobStore: Object inheriting toil.jobStores.abstractJobStore.AbstractJobStore.
+        :param jobCache:
+        :return:
         """
 
         def getJob(jobId):
             if jobCache is not None:
-                try:
+                if jobId in jobCache:
                     return jobCache[jobId]
-                except ValueError:
-                    return jobStore.load(jobId)
-            else:
-                return jobStore.load(jobId)
+            return jobStore.load(jobId)
 
         # If the jobGraph has a command, is a checkpoint, has services or is ready to be
         # deleted it is ready to be processed
-        if (jobGraph.command is not None
-            or jobGraph.checkpoint is not None
-            or len(jobGraph.services) > 0
-            or len(jobGraph.stack) == 0):
+        if jobGraph.command is not None or jobGraph.checkpoint is not None or jobGraph.services or not jobGraph.stack:
             logger.debug('Found job to run: %s, with command: %s, with checkpoint: %s, '
                          'with  services: %s, with stack: %s', jobGraph.jobStoreID,
                          jobGraph.command is not None, jobGraph.checkpoint is not None,
@@ -111,14 +106,14 @@ class ToilState( object ):
             
             # Record the number of successors
             self.successorCounts[jobGraph.jobStoreID] = len(jobGraph.stack[-1])
-            
+
             def processSuccessorWithMultiplePredecessors(successorJobGraph):
                 # If jobGraph is not reported as complete by the successor
                 if jobGraph.jobStoreID not in successorJobGraph.predecessorsFinished:
-                    
-                    # Update the sucessor's status to mark the predecessor complete
+
+                    # Update the successor's status to mark the predecessor complete
                     successorJobGraph.predecessorsFinished.add(jobGraph.jobStoreID)
-            
+
                 # If the successor has no predecessors to finish
                 assert len(successorJobGraph.predecessorsFinished) <= successorJobGraph.predecessorNumber
                 if len(successorJobGraph.predecessorsFinished) == successorJobGraph.predecessorNumber:
@@ -144,7 +139,7 @@ class ToilState( object ):
                     if successorJobNode.predecessorNumber > 1:
                         
                         # We load the successor job
-                        successorJobGraph =  getJob(successorJobStoreID)
+                        successorJobGraph = getJob(successorJobStoreID)
                         
                         # We put the successor job in the cache of successor jobs with multiple predecessors
                         assert successorJobStoreID not in self.jobsToBeScheduledWithMultiplePredecessors

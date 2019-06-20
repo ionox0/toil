@@ -1,4 +1,4 @@
-# Copyright (C) 2015-2016 Regents of the University of California
+# Copyright (C) 2015-2018 Regents of the University of California
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -11,19 +11,24 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 from __future__ import absolute_import, print_function
+from future.utils import raise_
 from builtins import range
-from toil.test import ToilTest, slow
 from uuid import uuid4
-
-import math
 import os
 import random
 import tempfile
+import logging
+import inspect
+import sys
 
-# Python 3 compatibility imports
-from six.moves import xrange
+from toil.lib.exceptions import panic
+from toil.common import getNodeID
+from toil.test import ToilTest, slow
+
+log = logging.getLogger(__name__)
+logging.basicConfig()
+
 
 class MiscTests(ToilTest):
     """
@@ -33,6 +38,13 @@ class MiscTests(ToilTest):
     def setUp(self):
         super(MiscTests, self).setUp()
         self.testDir = self._createTempDir()
+
+    def testIDStability(self):
+        prevNodeID = None
+        for i in range(10, 1):
+            nodeID = getNodeID()
+            self.assertEquals(nodeID, prevNodeID)
+            prevNodeID = nodeID
 
     @slow
     def testGetSizeOfDirectoryWorks(self):
@@ -60,7 +72,7 @@ class MiscTests(ToilTest):
             if random.randint(0,100) < 75:
                 # Create a fresh file in the range of 1-10 MB
                 fileSize = int(round(random.random(), 2) * 10 * 1024 * 1024)
-                with open(fileName, 'w') as fileHandle:
+                with open(fileName, 'wb') as fileHandle:
                     fileHandle.write(os.urandom(fileSize))
                 files[fileName] = fileSize
             else:
@@ -78,3 +90,74 @@ class MiscTests(ToilTest):
     @staticmethod
     def _getRandomName():
         return uuid4().hex
+
+
+class TestPanic(ToilTest):
+    def test_panic_by_hand(self):
+        try:
+            self.try_and_panic_by_hand()
+        except:
+            self.__assert_raised_exception_is_primary()
+
+    def test_panic(self):
+        try:
+            self.try_and_panic()
+        except:
+            self.__assert_raised_exception_is_primary()
+
+    def test_panic_with_secondary(self):
+        try:
+            self.try_and_panic_with_secondary()
+        except:
+            self.__assert_raised_exception_is_primary()
+
+    def test_nested_panic(self):
+        try:
+            self.try_and_nested_panic_with_secondary()
+        except:
+            self.__assert_raised_exception_is_primary()
+
+    def try_and_panic_by_hand(self):
+        try:
+            self.line_of_primary_exc = inspect.currentframe().f_lineno + 1
+            raise ValueError("primary")
+        except Exception:
+            exc_type, exc_value, exc_traceback = sys.exc_info()
+            try:
+                raise RuntimeError("secondary")
+            except Exception:
+                pass
+            raise_(exc_type, exc_value, exc_traceback)
+
+    def try_and_panic(self):
+        try:
+            self.line_of_primary_exc = inspect.currentframe().f_lineno + 1
+            raise ValueError("primary")
+        except:
+            with panic(log):
+                pass
+
+    def try_and_panic_with_secondary(self):
+        try:
+            self.line_of_primary_exc = inspect.currentframe().f_lineno + 1
+            raise ValueError("primary")
+        except:
+            with panic( log ):
+                raise RuntimeError("secondary")
+
+    def try_and_nested_panic_with_secondary(self):
+        try:
+            self.line_of_primary_exc = inspect.currentframe().f_lineno + 1
+            raise ValueError("primary")
+        except:
+            with panic( log ):
+                with panic( log ):
+                    raise RuntimeError("secondary")
+
+    def __assert_raised_exception_is_primary(self):
+        exc_type, exc_value, exc_traceback = sys.exc_info()
+        self.assertEquals(exc_type, ValueError)
+        self.assertEquals(str(exc_value), "primary")
+        while exc_traceback.tb_next is not None:
+            exc_traceback = exc_traceback.tb_next
+        self.assertEquals(exc_traceback.tb_lineno, self.line_of_primary_exc)

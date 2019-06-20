@@ -1,4 +1,4 @@
-# Copyright (C) 2015-2016 Regents of the University of California
+# Copyright (C) 2015-2018 Regents of the University of California
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -11,30 +11,34 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 from __future__ import absolute_import
-
 from builtins import str
 import os
 import sys
 import uuid
 import shutil
 import tempfile
-
 import pytest
+import logging
+
+pkg_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))  # noqa
+sys.path.insert(0, pkg_root)  # noqa
+
+import time
+import psutil
 
 import toil
-import logging
 import toil.test.sort.sort
 from toil import subprocess
 from toil import resolveEntryPoint
 from toil.job import Job
+from toil.utils.toilStatus import ToilStatus
 from toil.lib.bioio import getTempFile, system
-from toil.test import ToilTest, needs_aws, needs_rsync3, integrative, slow
+from toil.test import ToilTest, needs_aws, needs_rsync3, integrative, slow, needs_cwl, needs_docker
 from toil.test.sort.sortTest import makeFileToSort
 from toil.utils.toilStats import getStats, processData
 from toil.common import Toil, Config
-
+from toil.provisioners import clusterFactory
 
 logger = logging.getLogger(__name__)
 
@@ -61,9 +65,22 @@ class UtilsTest(ToilTest):
             self.correctSort = fileHandle.readlines()
             self.correctSort.sort()
 
+        self.sort_workflow_cmd = ['python', '-m', 'toil.test.sort.sort',
+                                  'file:' + self.toilDir,
+                                  '--clean=never',
+                                  '--numLines=1', '--lineLength=1']
+
     def tearDown(self):
+        if os.path.exists(self.tempDir):
+            shutil.rmtree(self.tempDir)
+        if os.path.exists(self.toilDir):
+            shutil.rmtree(self.toilDir)
+
+        for f in ['fileToSort.txt', 'sortedFile.txt', 'output.txt']:
+            if os.path.exists(f):
+                os.remove(f)
+
         ToilTest.tearDown(self)
-        system("rm -rf %s" % self.tempDir)
 
     @property
     def toilMain(self):
@@ -89,37 +106,44 @@ class UtilsTest(ToilTest):
     @integrative
     @slow
     def testAWSProvisionerUtils(self):
+        """
+        Runs a number of the cluster utilities in sequence.
+
+        Launches a cluster with custom tags.
+        Verifies the tags exist.
+        ssh's into the cluster.
+        Does some weird string comparisons.
+        Makes certain that TOIL_WORKDIR is set as expected in the ssh'ed cluster.
+        Rsyncs a file and verifies it exists on the leader.
+        Destroys the cluster.
+
+        :return:
+        """
+        # TODO: Run these for the other clouds.
         clusterName = 'cluster-utils-test' + str(uuid.uuid4())
         keyName = os.getenv('TOIL_AWS_KEYNAME')
 
         try:
-            # --provisioner flag should default to aws, so we're not explicitly
-            # specifying that here
-            system([self.toilMain, 'launch-cluster', '--leaderNodeType=t2.micro',
-                    '--keyPairName=' + keyName, clusterName])
-        finally:
-            system([self.toilMain, 'destroy-cluster', '--provisioner=aws', clusterName])
-        try:
             from toil.provisioners.aws.awsProvisioner import AWSProvisioner
 
-            userTags = {'key1': 'value1', 'key2': 'value2', 'key3': 'value3'}
-            tags = {'Name': clusterName, 'Owner': keyName}
-            tags.update(userTags)
-
-            # launch preemptable master with same name
+            # launch master with an assortment of custom tags
             system([self.toilMain, 'launch-cluster', '-t', 'key1=value1', '-t', 'key2=value2', '--tag', 'key3=value3',
-                    '--leaderNodeType=m3.medium:0.2', '--keyPairName=' + keyName, clusterName,
-                    '--provisioner=aws', '--logLevel=DEBUG'])
+                    '--leaderNodeType=m3.medium', '--keyPairName=' + keyName, clusterName,
+                    '--provisioner=aws', '--zone=us-west-2a', '--logLevel=DEBUG'])
 
-            # test leader tags
-            leaderTags = AWSProvisioner._getLeader(clusterName).tags
-            self.assertEqual(tags, leaderTags)
+            cluster = clusterFactory(provisioner='aws', clusterName=clusterName)
+            leader = cluster.getLeader()
+
+            # check that the leader carries the appropriate tags
+            tags = {'key1': 'value1', 'key2': 'value2', 'key3': 'value3', 'Name': clusterName, 'Owner': keyName}
+            for key in tags:
+                self.assertEqual(tags[key], leader.tags.get(key))
 
             # Test strict host key checking
             # Doesn't work when run locally.
-            if(keyName == 'jenkins@jenkins-master'):
+            if keyName == 'jenkins@jenkins-master':
                 try:
-                    AWSProvisioner.sshLeader(clusterName=clusterName, strict=True)
+                    leader.sshAppliance(strict=True)
                 except RuntimeError:
                     pass
                 else:
@@ -127,7 +151,7 @@ class UtilsTest(ToilTest):
 
             # Add the host key to known_hosts so that the rest of the tests can
             # pass without choking on the verification prompt.
-            AWSProvisioner.sshLeader(clusterName=clusterName, strict=True, sshOptions=['-oStrictHostKeyChecking=no'])
+            leader.sshAppliance('bash', strict=True, sshOptions=['-oStrictHostKeyChecking=no'])
 
             system([self.toilMain, 'ssh-cluster', '--provisioner=aws', clusterName])
 
@@ -140,26 +164,20 @@ class UtilsTest(ToilTest):
                            '\\',
                            '| cat',
                            '&& cat',
-                           '; cat'
-                           ]
+                           '; cat']
             for test in testStrings:
-                logger.info('Testing SSH with special string: %s', test)
+                logger.debug('Testing SSH with special string: %s', test)
                 compareTo = "import sys; assert sys.argv[1]==%r" % test
-                AWSProvisioner.sshLeader(clusterName=clusterName,
-                                         args=['python', '-', test],
-                                         input=compareTo)
+                leader.sshAppliance('python', '-', test, input=compareTo)
 
             try:
-                AWSProvisioner.sshLeader(clusterName=clusterName,
-                                         args=['nonsenseShouldFail'])
+                leader.sshAppliance('nonsenseShouldFail')
             except RuntimeError:
                 pass
             else:
-                self.fail('The remote command failed silently where it should have '
-                          'raised an error')
+                self.fail('The remote command failed silently where it should have raised an error')
 
-            AWSProvisioner.sshLeader(clusterName=clusterName,
-                                     args=['python', '-c', "import os; assert os.environ['TOIL_WORKDIR']=='/var/lib/toil'"])
+            leader.sshAppliance('python', '-c', "import os; assert os.environ['TOIL_WORKDIR']=='/var/lib/toil'")
 
             # `toil rsync-cluster`
             # Testing special characters - string.punctuation
@@ -170,13 +188,13 @@ class UtilsTest(ToilTest):
                 tmpFile.write(testData)
                 tmpFile.flush()
                 # Upload file to leader
-                AWSProvisioner.rsyncLeader(clusterName=clusterName, args=[tmpFile.name, ":"])
+                leader.coreRsync(args=[tmpFile.name, ":"])
                 # Ensure file exists
-                AWSProvisioner.sshLeader(clusterName=clusterName, args=["test", "-e", relpath])
+                leader.sshAppliance("test", "-e", relpath)
             tmpDir = tempfile.mkdtemp()
             # Download the file again and make sure it's the same file
             # `--protect-args` needed because remote bash chokes on special characters
-            AWSProvisioner.rsyncLeader(clusterName=clusterName, args=["--protect-args", ":" + relpath, tmpDir])
+            leader.coreRsync(args=["--protect-args", ":" + relpath, tmpDir])
             with open(os.path.join(tmpDir, relpath), "r") as f:
                 self.assertEqual(f.read(), testData, "Downloaded file does not match original file")
         finally:
@@ -192,7 +210,6 @@ class UtilsTest(ToilTest):
         Tests the status and stats commands of the toil command line utility using the
         sort example with the --restart flag.
         """
-
         # Get the sort command to run
         toilCommand = [sys.executable,
                        '-m', toil.test.sort.sort.__name__,
@@ -237,7 +254,7 @@ class UtilsTest(ToilTest):
                     self.fail()  # Exceeded a reasonable number of restarts
                 totalTrys += 1
 
-                # Check the toil status command does not issue an exception
+        # Check the toil status command does not issue an exception
         system(self.statusCommand())
 
         # Check we can run 'toil stats'
@@ -296,7 +313,7 @@ class UtilsTest(ToilTest):
     @slow
     def testMultipleJobsPerWorkerStats(self):
         """
-        Tests case where multiple jobs are run on 1 worker to insure that all jobs report back their data
+        Tests case where multiple jobs are run on 1 worker to ensure that all jobs report back their data
         """
         options = Job.Runner.getDefaultOptions(self._getTestJobStorePath())
         options.clean = 'never'
@@ -307,14 +324,70 @@ class UtilsTest(ToilTest):
         jobStore = Toil.resumeJobStore(config.jobStore)
         stats = getStats(jobStore)
         collatedStats = processData(jobStore.config, stats)
-        self.assertTrue(len(collatedStats.job_types) == 2,
-                        "Some jobs are not represented in the stats")
+        self.assertTrue(len(collatedStats.job_types) == 2, "Some jobs are not represented in the stats.")
+
+    def check_status(self, status, status_fn, seconds=10):
+        i = 0.0
+        while status_fn(self.toilDir) != status:
+            time.sleep(0.5)
+            i += 0.5
+            if i > seconds:
+                s = status_fn(self.toilDir)
+                self.assertEqual(s, status, 'Status took longer than 10 seconds to fetch:  %s' % s)
+
+    def testGetPIDStatus(self):
+        """Test that ToilStatus.getPIDStatus() behaves as expected."""
+        wf = subprocess.Popen(self.sort_workflow_cmd)
+        self.check_status('RUNNING', status_fn=ToilStatus.getPIDStatus)
+        wf.wait()
+        self.check_status('COMPLETED', status_fn=ToilStatus.getPIDStatus)
+
+        os.remove(os.path.join(self.toilDir, 'pid.log'))
+        self.check_status('QUEUED', status_fn=ToilStatus.getPIDStatus)
+
+    def testGetStatusFailedToilWF(self):
+        """
+        Test that ToilStatus.getStatus() behaves as expected with a failing Toil workflow.
+
+        While this workflow could be called by importing and evoking its main function, doing so would remove the
+        opportunity to test the 'RUNNING' functionality of getStatus().
+        """
+        # --badWorker is set to force failure.
+        wf = subprocess.Popen(self.sort_workflow_cmd + ['--badWorker=1'])
+        self.check_status('RUNNING', status_fn=ToilStatus.getStatus)
+        wf.wait()
+        self.check_status('ERROR', status_fn=ToilStatus.getStatus)
+
+    @needs_cwl
+    @needs_docker
+    def testGetStatusFailedCWLWF(self):
+        """Test that ToilStatus.getStatus() behaves as expected with a failing CWL workflow."""
+        # --badWorker is set to force failure.
+        cmd = ['toil-cwl-runner', '--jobStore', self.toilDir, '--clean=never', '--badWorker=1',
+               'src/toil/test/cwl/sorttool.cwl', '--reverse', '--input', 'src/toil/test/cwl/whale.txt']
+        wf = subprocess.Popen(cmd)
+        self.check_status('RUNNING', status_fn=ToilStatus.getStatus)
+        wf.wait()
+        self.check_status('ERROR', status_fn=ToilStatus.getStatus)
+
+    @needs_cwl
+    @needs_docker
+    def testGetStatusSuccessfulCWLWF(self):
+        """Test that ToilStatus.getStatus() behaves as expected with a successful CWL workflow."""
+        cmd = ['toil-cwl-runner', '--jobStore', self.toilDir, '--clean=never',
+               'src/toil/test/cwl/sorttool.cwl', '--reverse', '--input', 'src/toil/test/cwl/whale.txt']
+        wf = subprocess.Popen(cmd)
+        self.check_status('RUNNING', status_fn=ToilStatus.getStatus)
+        wf.wait()
+        self.check_status('COMPLETED', status_fn=ToilStatus.getStatus)
+
 
 def printUnicodeCharacter():
     # We want to get a unicode character to stdout but we can't print it directly because of
     # Python encoding issues. To work around this we print in a separate Python process. See
     # http://stackoverflow.com/questions/492483/setting-the-correct-encoding-when-piping-stdout-in-python
-    subprocess.check_call([sys.executable, '-c', "print '\\xc3\\xbc'"])
+    subprocess.check_call([sys.executable, '-c', "print('\\xc3\\xbc')"])
+
 
 class RunTwoJobsPerWorker(Job):
     """

@@ -48,7 +48,7 @@ class TorqueBatchSystem(AbstractGridEngineBatchSystem):
             """ Determines PBS/Torque version via pbsnodes
             """
             try:
-                out = subprocess.check_output(["pbsnodes", "--version"])
+                out = subprocess.check_output(["pbsnodes", "--version"]).decode('utf-8')
 
                 if "PBSPro" in out:
                      logger.debug("PBS Pro proprietary Torque version detected")
@@ -75,7 +75,7 @@ class TorqueBatchSystem(AbstractGridEngineBatchSystem):
                 return times
             # Only query for job IDs to avoid clogging the batch system on heavily loaded clusters
             # PBS plain qstat will return every running job on the system.
-            jobids = sorted(currentjobs.keys())
+            jobids = sorted(list(currentjobs.keys()))
             if self._version == "pro":
                 process = subprocess.Popen(['qstat', '-x'] + jobids, stdout=subprocess.PIPE)
             elif self._version == "oss":
@@ -86,7 +86,7 @@ class TorqueBatchSystem(AbstractGridEngineBatchSystem):
 
             # qstat supports XML output which is more comprehensive, but PBSPro does not support it 
             # so instead we stick with plain commandline qstat tabular outputs
-            for currline in stdout.split('\n'):
+            for currline in stdout.decode('utf-8').split('\n'):
                 items = currline.strip().split()
                 if items:
                     jobid = items[0].strip()
@@ -183,7 +183,6 @@ class TorqueBatchSystem(AbstractGridEngineBatchSystem):
                 reqline.append('mem=' + memStr)
 
             if cpu is not None and math.ceil(cpu) > 1:
-                reqline.append('ncpus=' + str(int(math.ceil(cpu))))
                 reqline.append('nodes=1:ppn=' + str(int(math.ceil(cpu))))
 
             # Other resource requirements can be passed through the environment (see man qsub)

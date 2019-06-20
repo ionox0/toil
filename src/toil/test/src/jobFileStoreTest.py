@@ -13,6 +13,7 @@
 # limitations under the License.
 from __future__ import absolute_import
 from builtins import range
+import codecs
 import random
 import os
 import errno
@@ -22,6 +23,7 @@ from six.moves import xrange
 
 from toil.common import Toil
 from toil.job import Job
+from toil.fileStore import FileID
 from toil.test import ToilTest, slow
 
 PREFIX_LENGTH=200
@@ -107,6 +109,9 @@ def fileTestJob(job, inputFileStoreIDs, testStrings, chainLength):
             else:
                 #Check the local file is as we expect
                 with job.fileStore.readGlobalFileStream(fileStoreID) as fH:
+                    # File streams are binary in Python 3 and can't do readline.
+                    # But a StreamReader for UTF-8 is exactly the adapter we need.
+                    fH = codecs.getreader('utf-8')(fH)
                     string = fH.readline()
                     
             #Check the string we get back is what we expect
@@ -130,12 +135,22 @@ def fileTestJob(job, inputFileStoreIDs, testStrings, chainLength):
             with open(tempFile, 'w') as fH:
                 fH.write(testString)
             #Write a local copy of the file using the local file
-            outputFileStoreIds.append(job.fileStore.writeGlobalFile(tempFile))
+            fileStoreID = job.fileStore.writeGlobalFile(tempFile)
+            
+            # Make sure it returned a valid and correct FileID with the right size
+            assert isinstance(fileStoreID, FileID)
+            assert fileStoreID.size == len(testString.encode('utf-8'))
+            
+            outputFileStoreIds.append(fileStoreID)
         else:
             #Use the writeGlobalFileStream method to write the file
             with job.fileStore.writeGlobalFileStream() as (fH, fileStoreID):
-                fH.write(testString)
+                fH.write(testString.encode('utf-8'))
                 outputFileStoreIds.append(fileStoreID)
+                
+            #Make sure it returned a valid and correct FileID with the right size
+            assert isinstance(fileStoreID, FileID)
+            assert fileStoreID.size == len(testString.encode('utf-8'))
 
     if chainLength > 0:
         #Make a child that will read these files and check it gets the same results
@@ -154,7 +169,7 @@ def simpleFileStoreJob(job):
 
     testID2 = None
     with job.fileStore.writeGlobalFileStream() as (f, fileID):
-        f.write(streamingFileStoreString)
+        f.write(streamingFileStoreString.encode('utf-8'))
         testID2 = fileID
 
     job.addChildJobFn(fileStoreChild, testID1, testID2)
@@ -162,7 +177,7 @@ def simpleFileStoreJob(job):
 
 def fileStoreChild(job, testID1, testID2):
     with job.fileStore.readGlobalFileStream(testID1) as f:
-        assert(f.read() == fileStoreString)
+        assert(f.read().decode('utf-8') == fileStoreString)
 
     localFilePath = os.path.join(job.fileStore.getLocalTempDir(), "childTemp.txt")
     job.fileStore.readGlobalFile(testID2, localFilePath)

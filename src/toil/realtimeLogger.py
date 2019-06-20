@@ -1,4 +1,4 @@
-# Copyright (C) 2015-2016 Regents of the University of California
+# Copyright (C) 2015-2018 Regents of the University of California
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -20,20 +20,18 @@ from __future__ import absolute_import
 from future import standard_library
 standard_library.install_aliases()
 from builtins import object
+from builtins import super
 import os
 import os.path
 import json
 import logging
 import logging.handlers
 import threading
-
-# Python 3 compatibility imports
 from six.moves import socketserver as SocketServer
+from future.utils import with_metaclass
 
 import toil.lib.bioio
 from toil.batchSystems.options import getPublicIP
-
-from future.utils import with_metaclass
 
 log = logging.getLogger(__name__)
 
@@ -53,9 +51,10 @@ class LoggingDatagramHandler(SocketServer.BaseRequestHandler):
         """
         # Unpack the data from the request
         data, socket = self.request
+        
         try:
             # Parse it as JSON
-            message_attrs = json.loads(data)
+            message_attrs = json.loads(data.decode('utf-8'))
             # Fluff it up into a proper logging record
             record = logging.makeLogRecord(message_attrs)
         except:
@@ -73,12 +72,11 @@ class JSONDatagramHandler(logging.handlers.DatagramHandler):
     
     They have to fit in a single UDP datagram, so don't try to log more than 64kb at once.
     """
-
     def makePickle(self, record):
         """
         Actually, encode the record as bare JSON instead.
         """
-        return json.dumps(record.__dict__)
+        return json.dumps(record.__dict__).encode('utf-8')
 
 
 class RealtimeLoggerMetaclass(type):
@@ -86,7 +84,6 @@ class RealtimeLoggerMetaclass(type):
     Metaclass for RealtimeLogger that lets you do things like RealtimeLogger.warning(),
     RealtimeLogger.info(), etc.
     """
-
     def __getattr__(self, name):
         """
         If a real attribute can't be found, try one of the logging methods on the actual logger
@@ -125,7 +122,6 @@ class RealtimeLogger(with_metaclass(RealtimeLoggerMetaclass, object)):
     initialized = 0
 
     # Client-side state
-
     logger = None
 
     @classmethod
@@ -157,7 +153,7 @@ class RealtimeLogger(with_metaclass(RealtimeLoggerMetaclass, object)):
                     _setEnv('ADDRESS', '%s:%i' % (ip, port))
                     _setEnv('LEVEL', level)
                 else:
-                    log.info('Real-time logging disabled')
+                    log.debug('Real-time logging disabled')
             else:
                 if level:
                     log.warn('Ignoring nested request to start real-time logging')
@@ -228,7 +224,7 @@ class RealtimeLogger(with_metaclass(RealtimeLoggerMetaclass, object)):
         suppressed on the workers. Note that this is different from passing level='OFF',
         which is equivalent to level='CRITICAL' and does not disable the server.
         """
-        super(RealtimeLogger, self).__init__()
+        super().__init__()
         self.__level = level
         self.__batchSystem = batchSystem
 

@@ -20,41 +20,61 @@ def runSetup():
     Calls setup(). This function exists so the setup() invocation preceded more internal
     functionality. The `version` module is imported dynamically by importVersion() below.
     """
-    boto = 'boto==2.38.0'
-    boto3 = 'boto3==1.4.7'
-    futures = 'futures==3.0.5'
-    pycryptodome = 'pycryptodome==3.5.0'
+    boto = 'boto==2.48.0'
+    boto3 = 'boto3>=1.7.50, <2.0'
+    futures = 'futures==3.1.1'
+    pycryptodome = 'pycryptodome==3.5.1'
+    pymesos = 'pymesos==0.3.7'
     psutil = 'psutil==3.0.1'
-    protobuf = 'protobuf==3.5.1'
-    azure = 'azure==2.0.0'
     azureCosmosdbTable = 'azure-cosmosdb-table==0.37.1'
     azureAnsible = 'ansible[azure]==2.5.0a1'
     azureStorage = 'azure-storage==0.35.1'
-    msRest = 'msrest==0.4.25'
+    secretstorage = 'secretstorage<3'
     pynacl = 'pynacl==1.1.2'
     gcs = 'google-cloud-storage==1.6.0'
     gcs_oauth2_boto_plugin = 'gcs_oauth2_boto_plugin==1.14'
     apacheLibcloud = 'apache-libcloud==2.2.1'
-    cwltool = 'cwltool==1.0.20180306140409'
-    schemaSalad = 'schema-salad >= 2.6, < 3'
-    galaxyLib = 'galaxy-lib==17.9.3'
-    cwltest = 'cwltest>=1.0.20180130081614'
+    cwltool = 'cwltool==1.0.20181118133959'
+    schemaSalad = 'schema-salad>=2.6, <3'
+    galaxyLib = 'galaxy-lib==18.9.2'
     htcondor = 'htcondor>=8.6.0'
+    dill = 'dill==0.2.7.1'
+    six = 'six>=1.10.0'
+    future = 'future'
+    requests = 'requests==2.18.4'
+    docker = 'docker==2.5.1'
+    subprocess32 = 'subprocess32<=3.5.2'
+    dateutil = 'python-dateutil'
+    addict = 'addict<=2.2.0'
+    sphinx = 'sphinx==1.7.5'
+    pathlib2 = 'pathlib2==2.3.2'
+
+    core_reqs = [
+        dill,
+        six,
+        future,
+        requests,
+        docker,
+        dateutil,
+        psutil,
+        subprocess32,
+        addict,
+        sphinx,
+        pathlib2]
 
     mesos_reqs = [
-        psutil,
-        protobuf]
+        pymesos,
+        psutil]
     aws_reqs = [
         boto,
         boto3,
         futures,
         pycryptodome]
     azure_reqs = [
-        azure,
         azureCosmosdbTable,
+        secretstorage,
         azureAnsible,
-        azureStorage,
-        msRest]
+        azureStorage]
     encryption_reqs = [
         pynacl]
     google_reqs = [
@@ -64,28 +84,30 @@ def runSetup():
     cwl_reqs = [
         cwltool,
         schemaSalad,
-        galaxyLib,
-        cwltest]
+        galaxyLib]
     wdl_reqs = []
     htcondor_reqs = [
         htcondor]
 
+    # htcondor is not supported by apple
+    # this is tricky to conditionally support in 'all' due
+    # to how wheels work, so it is not included in all and
+    # must be explicitly installed as an extra
     all_reqs = \
         mesos_reqs + \
         aws_reqs + \
         azure_reqs + \
         encryption_reqs + \
         google_reqs + \
-        cwl_reqs + \
-        htcondor_reqs
+        cwl_reqs
 
-    # htcondor is not supported by apple
-    if sys.platform != 'linux' or 'linux2':
-        all_reqs.remove(htcondor)
+    # remove the subprocess32 backport if not python2
+    if not sys.version_info[0] == 2:
+        core_reqs.remove(subprocess32)
 
     setup(
         name='toil-ionox0',
-        version='0.0.5',
+        version='0.0.6',
         description='Pipeline management software for clusters.',
         author='Benedict Paten',
         author_email='ionox0@gmail.com',
@@ -109,7 +131,7 @@ def runSetup():
             'google': google_reqs,
             'cwl': cwl_reqs,
             'wdl': wdl_reqs,
-            'htcondor': htcondor_reqs,
+            'htcondor:sys_platform!="darwin"': htcondor_reqs,
             'all': all_reqs},
         package_dir={'': 'src'},
         packages=find_packages(where='src',
@@ -162,7 +184,7 @@ def importVersion():
                 raise
 
         if old != new:
-            with NamedTemporaryFile(dir='src/toil', prefix='version.py.', delete=False) as f:
+            with NamedTemporaryFile(mode='w',dir='src/toil', prefix='version.py.', delete=False) as f:
                 f.write(new)
             os.rename(f.name, 'src/toil/version.py')
     # Unfortunately, we can't use a straight import here because that would also load the stuff

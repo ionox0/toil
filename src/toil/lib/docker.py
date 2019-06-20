@@ -1,33 +1,44 @@
 from __future__ import absolute_import
-import logging
-import os
-import pipes
-from toil import subprocess
+from past.builtins import map
+
+try:
+    # In Python 3 we have this quote
+    from shlex import quote
+except ImportError:
+    # But in 2.7 we have this deprecated one
+    from pipes import quote
+
 import docker
 import base64
-import time
 import requests
-
+import logging
+import os
 from docker.errors import create_api_error_from_http_exception
 from docker.errors import ContainerError
 from docker.errors import ImageNotFound
-from docker.errors import APIError
 from docker.errors import NotFound
-from docker.errors import DockerException
-from docker.utils.types import LogConfig
-from docker.api.container import ContainerApiMixin
 
-from bd2k.util.retry import retry
-from docker import client
-from pwd import getpwuid
-
-from toil.lib import dockerPredicate
-from toil.lib import FORGO
-from toil.lib import STOP
-from toil.lib import RM
-from toil.test import timeLimit
+from toil import subprocess
+from toil.lib.retry import retry
 
 logger = logging.getLogger(__name__)
+
+FORGO = 0
+STOP = 1
+RM = 2
+
+
+def dockerPredicate(e):
+    """
+    Used to ensure Docker exceptions are retried if appropriate
+
+    :param e: Exception
+    :return: True if e retriable, else False
+    """
+    if not isinstance(e, subprocess.CalledProcessError):
+        return False
+    if e.returncode == 125:
+        return True
 
 
 def dockerCheckOutput(*args, **kwargs):
@@ -42,6 +53,7 @@ def dockerCheckOutput(*args, **kwargs):
                 "is deprecated, please switch to apiDockerCall().")
     return subprocessDockerCall(*args, checkOutput=True, **kwargs)
 
+
 def dockerCall(*args, **kwargs):
     """
     Deprecated.  Runs subprocessDockerCall() using 'subprocess.check_output()'.
@@ -53,6 +65,7 @@ def dockerCall(*args, **kwargs):
     logger.warn("WARNING: dockerCall() using subprocess.check_output() "
                 "is deprecated, please switch to apiDockerCall().")
     return subprocessDockerCall(*args, checkOutput=False, **kwargs)
+
 
 def subprocessDockerCall(job,
                          tool,
@@ -157,7 +170,7 @@ def subprocessDockerCall(job,
     if len(parameters) > 0 and type(parameters[0]) is list:
         # When piping, all arguments now get merged into a single string to bash -c.
         # We try to support spaces in paths by wrapping them all in quotes first.
-        chain_params = [' '.join(p) for p in [list(map(pipes.quote, q)) for q in parameters]]
+        chain_params = [' '.join(p) for p in [list(map(quote, q)) for q in parameters]]
         # Use bash's set -eo pipefail to detect and abort on a failure in any command in the chain
         call = baseDockerCall + ['--entrypoint', '/bin/bash',  tool, '-c',
                                  'set -eo pipefail && {}'.format(' | '.join(chain_params))]
@@ -181,6 +194,7 @@ def subprocessDockerCall(job,
 
     _fixPermissions(tool=tool, workDir=workDir)
     return out
+
 
 def apiDockerCall(job,
                   image,
@@ -220,6 +234,11 @@ def apiDockerCall(job,
                       image='quay.io/ucgc_cgl/samtools:latest',
                       working_dir=working_dir,
                       parameters=parameters)
+                      
+    Note that when run with detatch=False, or with detatch=True and stdout=True
+    or stderr=True, this is a blocking call. When run with detatch=True and
+    without output capture, the container is started and returned without
+    waiting for it to finish.
 
     :param toil.Job.job job: The Job instance for the calling function.
     :param str image: Name of the Docker image to be used.
@@ -243,15 +262,15 @@ def apiDockerCall(job,
                       https://docker-py.readthedocs.io/en/stable/containers.html
     :param bool detach: Run the container in detached mode. (equivalent to '-d')
     :param bool stdout: Return logs from STDOUT when detach=False (default: True).
-                        Stream stdout to a file when detach=True (default: False).
-                        Streaming defaults to output.log, and can be specified with
-                        the "streamfile" kwarg.
+                        Block and capture stdout to a file when detach=True
+                        (default: False). Output capture defaults to output.log,
+                        and can be specified with the "streamfile" kwarg.
     :param bool stderr: Return logs from STDERR when detach=False (default: False).
-                        Stream stderr to a file when detach=True (default: False).
-                        Streaming defaults to output.log, and can be specified with
-                        the "streamfile" kwarg.
-    :param str streamfile: Stream to a file if stderr and/or stdout are True.
-                           Must set detach=True to enable.  Defaults to "output.log".
+                        Block and capture stderr to a file when detach=True
+                        (default: False). Output capture defaults to output.log,
+                        and can be specified with the "streamfile" kwarg.
+    :param str streamfile: Collect container output to this file if detach=True and 
+                        stderr and/or stdout are True. Defaults to "output.log".
     :param dict log_config: Specify the logs to return from the container.  See:
                       https://docker-py.readthedocs.io/en/stable/containers.html
     :param bool remove: Remove the container on exit or not.
@@ -269,6 +288,11 @@ def apiDockerCall(job,
                    run command.  The list is 75 keywords total, for examples
                    and full documentation see:
                    https://docker-py.readthedocs.io/en/stable/containers.html
+                   
+    :returns: Returns the standard output/standard error text, as requested, when 
+              detatch=False. Returns the underlying
+              docker.models.containers.Container object from the Docker API when
+              detatch=True.
     """
 
     # make certain that files have the correct permissions
@@ -295,7 +319,7 @@ def apiDockerCall(job,
         if entrypoint is None:
             entrypoint = ['/bin/bash', '-c']
         chain_params = \
-            [' '.join((pipes.quote(arg) for arg in command)) \
+            [' '.join((quote(arg) for arg in command)) \
              for command in parameters]
         command = ' | '.join(chain_params)
         pipe_prefix = "set -eo pipefail && "
@@ -303,13 +327,13 @@ def apiDockerCall(job,
         logger.debug("Calling docker with: " + repr(command))
 
     # If 'parameters' is a normal list, join all elements into a single string
-    # element.
-    # Example: ['echo','the', 'Oread'] becomes: ['echo the Oread']
+    # element, quoting and escaping each element.
+    # Example: ['echo','the Oread'] becomes: ["echo 'the Oread'"]
     # Note that this is still a list, and the docker API prefers this as best
     # practice:
     # http://docker-py.readthedocs.io/en/stable/containers.html
     elif len(parameters) > 0 and type(parameters) is list:
-        command = ' '.join(parameters)
+        command = ' '.join((quote(arg) for arg in parameters))
         logger.debug("Calling docker with: " + repr(command))
 
     # If the 'parameters' lists are empty, they are respecified as None, which
@@ -395,11 +419,18 @@ def apiDockerCall(job,
                 if streamfile is None:
                     streamfile = 'output.log'
                 for line in container.logs(stdout=stdout, stderr=stderr, stream=True):
+                    # stream=True makes this loop blocking; we will loop until
+                    # the container stops and there is no more output.
                     with open(streamfile, 'w') as f:
                         f.write(line)
+                        
+            # If we didn't capture output, the caller will need to .wait() on
+            # the container to know when it is done. Even if we did capture
+            # output, the caller needs the container to get at the exit code.
+            return container
+            
     except ContainerError:
-        logger.error("Docker had non-zero exit.  Check your command: " + \
-                      repr(command))
+        logger.error("Docker had non-zero exit.  Check your command: " + repr(command))
         raise
     except ImageNotFound:
         logger.error("Docker image not found.")
@@ -407,8 +438,7 @@ def apiDockerCall(job,
     except requests.exceptions.HTTPError as e:
         logger.error("The server returned an error.")
         raise create_api_error_from_http_exception(e)
-    except:
-        raise
+
 
 def dockerKill(container_name, client, gentleKill=False):
     """
@@ -433,6 +463,7 @@ def dockerKill(container_name, client, gentleKill=False):
                       container_name)
         raise create_api_error_from_http_exception(e)
 
+
 def dockerStop(container_name, client):
     """
     Gracefully kills a container.  Equivalent to "docker stop":
@@ -441,6 +472,7 @@ def dockerStop(container_name, client):
     :param client: The docker API client object to call.
     """
     dockerKill(container_name, client, gentleKill=True)
+
 
 def containerIsRunning(container_name):
     """
@@ -464,10 +496,11 @@ def containerIsRunning(container_name):
                       container_name)
         raise create_api_error_from_http_exception(e)
 
+
 def getContainerName(job):
     """Create a random string including the job name, and return it."""
     return '--'.join([str(job),
-                      base64.b64encode(os.urandom(9), '-_')])\
+                      base64.b64encode(os.urandom(9), b'-_').decode('utf-8')])\
                       .replace("'", '').replace('"', '').replace('_', '')
 
 
@@ -481,25 +514,25 @@ def _dockerKill(containerName, action):
     if running is None:
         # This means that the container doesn't exist.  We will see this if the
         # container was run with --rm and has already exited before this call.
-        logger.info('The container with name "%s" appears to have already been '
+        logger.debug('The container with name "%s" appears to have already been '
                     'removed.  Nothing to '
                   'do.', containerName)
     else:
         if action in (None, FORGO):
-            logger.info('The container with name %s continues to exist as we '
+            logger.debug('The container with name %s continues to exist as we '
                         'were asked to forgo a '
                       'post-job action on it.', containerName)
         else:
-            logger.info('The container with name %s exists. Running '
+            logger.debug('The container with name %s exists. Running '
                         'user-specified defer functions.',
                          containerName)
             if running and action >= STOP:
-                logger.info('Stopping container "%s".', containerName)
+                logger.debug('Stopping container "%s".', containerName)
                 for attempt in retry(predicate=dockerPredicate):
                     with attempt:
                         subprocess.check_call(['docker', 'stop', containerName])
             else:
-                logger.info('The container "%s" was not found to be running.',
+                logger.debug('The container "%s" was not found to be running.',
                             containerName)
             if action >= RM:
                 # If the container was run with --rm, then stop will most likely
@@ -507,15 +540,16 @@ def _dockerKill(containerName, action):
                 # remove it.
                 running = containerIsRunning(containerName)
                 if running is not None:
-                    logger.info('Removing container "%s".', containerName)
+                    logger.debug('Removing container "%s".', containerName)
                     for attempt in retry(predicate=dockerPredicate):
                         with attempt:
                             subprocess.check_call(['docker', 'rm', '-f',
                                                    containerName])
                 else:
-                    logger.info('Container "%s" was not found on the system.'
+                    logger.debug('Container "%s" was not found on the system.'
                                 'Nothing to remove.',
                                  containerName)
+
 
 def _fixPermissions(tool, workDir):
     """

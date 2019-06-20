@@ -1,4 +1,4 @@
-# Copyright (C) 2015-2016 Regents of the University of California
+# Copyright (C) 2015-2018 Regents of the University of California
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 from __future__ import absolute_import, print_function
 from future import standard_library
 standard_library.install_aliases()
@@ -23,7 +22,6 @@ import sys
 import copy
 import random
 import json
-
 import tempfile
 import traceback
 import time
@@ -32,13 +30,8 @@ import logging
 import shutil
 from threading import Thread
 
-try:
-    import cPickle as pickle
-except ImportError:
-    import pickle
-
-from bd2k.util.expando import MagicExpando
-from toil.common import Toil
+from toil.lib.expando import MagicExpando
+from toil.common import Toil, safeUnpickleFromStream
 from toil.fileStore import FileStore
 from toil import logProcessContext
 from toil.job import Job
@@ -47,6 +40,7 @@ from toil.lib.bioio import getTotalCpuTime
 from toil.lib.bioio import getTotalCpuTimeAndMemoryUsage
 import signal
 
+logging.basicConfig()
 logger = logging.getLogger(__name__)
 
 def nextChainableJobGraph(jobGraph, jobStore):
@@ -93,7 +87,7 @@ def nextChainableJobGraph(jobGraph, jobStore):
 
     # Somewhat ugly, but check if job is a checkpoint job and quit if
     # so
-    if successorJobGraph.command.startswith( "_toil " ):
+    if successorJobGraph.command.startswith("_toil "):
         #Load the job
         successorJob = Job._loadJob(successorJobGraph.command, jobStore)
 
@@ -115,6 +109,7 @@ def workerScript(jobStore, config, jobName, jobStoreID, redirectOutputToLogFile=
     :param bool redirectOutputToLogFile: Redirect standard out and standard error to a log file
     """
     logging.basicConfig()
+    setLogLevel(config.logLevel)
 
     ##########################################
     #Create the worker killer, if requested
@@ -123,21 +118,39 @@ def workerScript(jobStore, config, jobName, jobStoreID, redirectOutputToLogFile=
     logFileByteReportLimit = config.maxLogFileSize
 
     if config.badWorker > 0 and random.random() < config.badWorker:
-        def badWorker():
-            #This will randomly kill the worker process at a random time 
-            time.sleep(config.badWorkerFailInterval * random.random())
-            os.kill(os.getpid(), signal.SIGKILL) #signal.SIGINT)
-            #TODO: FIX OCCASIONAL DEADLOCK WITH SIGINT (tested on single machine)
-        t = Thread(target=badWorker)
-        # Ideally this would be a daemon thread but that causes an intermittent (but benign)
-        # exception similar to the one described here:
-        # http://stackoverflow.com/questions/20596918/python-exception-in-thread-thread-1-most-likely-raised-during-interpreter-shutd
-        # Our exception is:
-        #    Exception in thread Thread-1 (most likely raised during interpreter shutdown):
-        #    <type 'exceptions.AttributeError'>: 'NoneType' object has no attribute 'kill'
-        # This attribute error is caused by the call os.kill() and apparently unavoidable with a
-        # daemon
-        t.start()
+        # We need to kill the process we are currently in, to simulate worker
+        # failure. We don't want to just send SIGKILL, because we can't tell
+        # that from a legitimate OOM on our CI runner. We're going to send
+        # SIGUSR1 so our terminations are distinctive, and then SIGKILL if that
+        # didn't stick. We definitely don't want to do this from *within* the
+        # process we are trying to kill, so we fork off. TODO: We can still
+        # leave the killing code running after the main Toil flow is done, but
+        # since it's now in a process instead of a thread, the main Python
+        # process won't wait around for its timeout to expire. I think this is
+        # better than the old thread-based way where all of Toil would wait
+        # around to be killed.
+        
+        killTarget = os.getpid()
+        sleepTime = config.badWorkerFailInterval * random.random()
+        if os.fork() == 0:
+            # We are the child
+            # Let the parent run some amount of time
+            time.sleep(sleepTime)
+            # Kill it gently
+            os.kill(killTarget, signal.SIGUSR1)
+            # Wait for that to stick
+            time.sleep(0.01)
+            try:
+                # Kill it harder. Hope the PID hasn't already been reused.
+                # If we succeeded the first time, this will OSError
+                os.kill(killTarget, signal.SIGKILL)
+            except OSError:
+                pass
+            # Exit without doing any of Toil's cleanup
+            os._exit()
+            
+        # We don't need to reap the child. Either it kills us, or we finish
+        # before it does. Either way, init will have to clean it up for us.
 
     ##########################################
     #Load the environment for the jobGraph
@@ -145,7 +158,7 @@ def workerScript(jobStore, config, jobName, jobStoreID, redirectOutputToLogFile=
     
     #First load the environment for the jobGraph.
     with jobStore.readSharedFileStream("environment.pickle") as fileHandle:
-        environment = pickle.load(fileHandle)
+        environment = safeUnpickleFromStream(fileHandle)
     for i in environment:
         if i not in ("TMPDIR", "TMP", "HOSTNAME", "HOSTTYPE"):
             os.environ[i] = environment[i]
@@ -154,8 +167,6 @@ def workerScript(jobStore, config, jobName, jobStoreID, redirectOutputToLogFile=
         for e in environment["PYTHONPATH"].split(':'):
             if e != '':
                 sys.path.append(e)
-
-    setLogLevel(config.logLevel)
 
     toilWorkflowDir = Toil.getWorkflowDir(config.workflowID, config.workDir)
 
@@ -292,7 +303,7 @@ def workerScript(jobStore, config, jobName, jobStoreID, redirectOutputToLogFile=
             ##########################################
             
             if jobGraph.command is not None:
-                assert jobGraph.command.startswith( "_toil " )
+                assert jobGraph.command.startswith("_toil ")
                 logger.debug("Got a command to run: %s" % jobGraph.command)
                 #Load the job
                 job = Job._loadJob(jobGraph.command, jobStore)
@@ -418,6 +429,8 @@ def workerScript(jobStore, config, jobName, jobStoreID, redirectOutputToLogFile=
         jobGraph = jobStore.load(jobStoreID)
         jobGraph.setupJobAfterFailure(config)
         workerFailed = True
+        if job and jobGraph.remainingRetryCount == 0:
+            job._succeeded = False
 
     ##########################################
     #Cleanup
@@ -450,7 +463,7 @@ def workerScript(jobStore, config, jobName, jobStoreID, redirectOutputToLogFile=
     # Now our file handles are in exactly the state they were in before.
 
     #Copy back the log file to the global dir, if needed
-    if workerFailed:
+    if workerFailed and redirectOutputToLogFile:
         jobGraph.logJobStoreFileID = jobStore.getEmptyFileStoreID(jobGraph.jobStoreID)
         jobGraph.chainedJobs = listOfJobs
         with jobStore.updateFileStream(jobGraph.logJobStoreFileID) as w:
@@ -460,7 +473,7 @@ def workerScript(jobStore, config, jobName, jobStoreID, redirectOutputToLogFile=
                         f.seek(-logFileByteReportLimit, 2)  # seek to last tooBig bytes of file
                     elif logFileByteReportLimit < 0:
                         f.seek(logFileByteReportLimit, 0)  # seek to first tooBig bytes of file
-                w.write(f.read())
+                w.write(f.read().encode('utf-8')) # TODO load file using a buffer
         jobStore.update(jobGraph)
 
     elif debugging and redirectOutputToLogFile:  # write log messages
@@ -475,7 +488,7 @@ def workerScript(jobStore, config, jobName, jobStoreID, redirectOutputToLogFile=
         statsDict.logs.messages = logMessages
 
     if (debugging or config.stats or statsDict.workers.logsToMaster) and not workerFailed:  # We have stats/logging to report back
-        jobStore.writeStatsAndLogging(json.dumps(statsDict))
+        jobStore.writeStatsAndLogging(json.dumps(statsDict, ensure_ascii=True))
 
     #Remove the temp dir
     cleanUp = config.cleanWorkDir
@@ -499,16 +512,6 @@ def main(argv=None):
     ##########################################
     #Load the jobStore/config file
     ##########################################
-
-    # Try to monkey-patch boto early so that credentials are cached.
-    try:
-        import boto
-    except ImportError:
-        pass
-    else:
-        # boto is installed, monkey patch it now
-        from bd2k.util.ec2.credentials import enable_metadata_credential_caching
-        enable_metadata_credential_caching()
 
     jobStore = Toil.resumeJobStore(jobStoreLocator)
     config = jobStore.config

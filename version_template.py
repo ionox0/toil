@@ -1,4 +1,4 @@
-# Copyright (C) 2015-2016 Regents of the University of California
+# Copyright (C) 2015-2018 Regents of the University of California
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -25,9 +25,11 @@ import the expand_ function and invoke it directly with either no or exactly one
 #  - don't import at module level unless you want the imported value to be included in the output
 #  - only import from the Python standard run-time library (you can't have any dependencies)
 
-baseVersion = '3.15.1a1'
 
+baseVersion = '3.19.0'
 cgcloudVersion = '1.6.0a1.dev393'
+dockerRegistry = 'quay.io/ucsc_cgl'
+dockerName = 'toil'
 
 
 def version():
@@ -93,11 +95,6 @@ def dockerMinimalTag():
     return distVersion()
 
 
-dockerRegistry = 'quay.io/ucsc_cgl'
-
-dockerName = 'toil'
-
-
 def buildNumber():
     """
     The Jenkins build number, if defined, else None.
@@ -109,11 +106,13 @@ def buildNumber():
 def currentCommit():
     from subprocess import check_output
     try:
-        output = check_output('git log --pretty=oneline -n 1 -- $(pwd)', shell=True).split()[0]
+        output = check_output('git log --pretty=oneline -n 1 -- $(pwd)', shell=True).decode('utf-8').split()[0]
     except:
         # Return this we are not in a git environment.
         return '000'
-    return output
+    if isinstance(output, bytes):
+        return output.decode('utf-8')
+    return str(output)
 
 
 def dirty():

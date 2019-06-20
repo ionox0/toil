@@ -24,13 +24,8 @@ import uuid
 import logging
 import time
 import os
-
-try:
-    import cPickle as pickle
-except ImportError:
-    import pickle
-
-from bd2k.util.retry import retry
+from toil import pickle
+from toil.lib.retry import retry
 from google.cloud import storage, exceptions
 from google.api_core.exceptions import GoogleAPICallError, InternalServerError, ServiceUnavailable
 from toil.lib.misc import truncExpBackoff
@@ -114,10 +109,24 @@ class GoogleJobStore(AbstractJobStore):
         self.readStatsBaseID = self.statsReadPrefix+self.statsBaseID
 
         self.sseKey = None
-        if not os.getenv('GOOGLE_APPLICATION_CREDENTIALS') and os.path.exists(self.nodeServiceAccountJson):
-            # load credentials from a file on GCE nodes if GOOGLE_APPLICATION_CREDENTIALS is not set
+        
+        # Determine if we have an override environment variable for our credentials.
+        # We don't pull out the filename; we just see if a name is there.
+        self.credentialsFromEnvironment = bool(os.getenv('GOOGLE_APPLICATION_CREDENTIALS', False))
+        
+        if self.credentialsFromEnvironment and not os.path.exists(os.getenv('GOOGLE_APPLICATION_CREDENTIALS')):
+            # If the file is missing, complain.
+            # This variable holds a file name and not any sensitive data itself.
+            log.warning("File '%s' from GOOGLE_APPLICATION_CREDENTIALS is unavailable! "
+                        "We may not be able to authenticate!",
+                        os.getenv('GOOGLE_APPLICATION_CREDENTIALS'))
+        
+        if not self.credentialsFromEnvironment and os.path.exists(self.nodeServiceAccountJson):
+            # load credentials from a particular file on GCE nodes if an override path is not set
             self.storageClient = storage.Client.from_service_account_json(self.nodeServiceAccountJson)
         else:
+            # Either a filename is specified, or our fallback file isn't there.
+            # See if Google can work out how to authenticate.
             self.storageClient = storage.Client()
 
 
@@ -155,7 +164,7 @@ class GoogleJobStore(AbstractJobStore):
             self.bucket.delete(force=True)
             # throws ValueError if bucket has more than 256 objects. Then we must delete manually
         except ValueError:
-            self.bucket.delete_blobs(self.bucket.list_blobs)
+            self.bucket.delete_blobs(self.bucket.list_blobs())
             self.bucket.delete()
             # if ^ throws a google.cloud.exceptions.Conflict, then we should have a deletion retry mechanism.
 
@@ -208,6 +217,21 @@ class GoogleJobStore(AbstractJobStore):
         # best effort delete associated files
         for blob in self.bucket.list_blobs(prefix=bytes(jobStoreID)):
             self._delete(blob.name)
+            
+    def getEnv(self):
+        """
+        Return a dict of environment variables to send out to the workers
+        so they can load the job store.
+        """
+        
+        env = {}
+        
+        if self.credentialsFromEnvironment:
+            # Send along the environment variable that points to the credentials file.
+            # It must be available in the same place on all nodes.
+            env['GOOGLE_APPLICATION_CREDENTIALS'] = os.getenv('GOOGLE_APPLICATION_CREDENTIALS')
+            
+        return env
 
     @googleRetry
     def jobs(self):
@@ -292,6 +316,10 @@ class GoogleJobStore(AbstractJobStore):
         """
         bucketName = url.netloc
         fileName = url.path
+
+        # remove leading '/', which can cause problems if fileName is a path
+        if fileName.startswith('/'):
+            fileName = fileName[1:]
 
         storageClient = storage.Client()
         bucket = storageClient.get_bucket(bucketName)

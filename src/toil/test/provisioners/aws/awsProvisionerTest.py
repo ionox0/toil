@@ -11,29 +11,21 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from builtins import next
-from builtins import str
-from builtins import range
 import logging
 import os
-from toil import subprocess
+import time
 from abc import abstractmethod
 from inspect import getsource
 from textwrap import dedent
-
-import time
-
-import pytest
-from boto.ec2.blockdevicemapping import BlockDeviceType
-from boto.exception import EC2ResponseError
-from toil.lib.ec2 import wait_instances_running
-
-
-from toil.provisioners.aws.awsProvisioner import AWSProvisioner
-
 from uuid import uuid4
 
+import pytest
+from builtins import next
+from builtins import range
+from builtins import str
 
+from toil import subprocess
+from toil.provisioners import clusterFactory
 from toil.test import needs_aws, integrative, ToilTest, needs_appliance, timeLimit, slow
 
 log = logging.getLogger(__name__)
@@ -62,7 +54,7 @@ class AbstractAWSAutoscaleTest(ToilTest):
     def createClusterUtil(self, args=None):
         if args is None:
             args = []
-        callCommand = ['toil', 'launch-cluster', '-p=aws', '--keyPairName=%s' % self.keyName,
+        callCommand = ['toil', 'launch-cluster', '-p=aws', '-z=us-west-2a','--keyPairName=%s' % self.keyName,
                        '--leaderNodeType=%s' % self.leaderInstanceType, self.clusterName]
         callCommand = callCommand + args if args else callCommand
         subprocess.check_call(callCommand)
@@ -89,18 +81,20 @@ class AbstractAWSAutoscaleTest(ToilTest):
         self.destroyClusterUtil()
         self.cleanJobStoreUtil()
 
-    def getMatchingRoles(self, clusterName):
-        from toil.provisioners.aws.awsProvisioner import AWSProvisioner
-        ctx = AWSProvisioner._buildContext(clusterName)
-        roles = list(ctx.local_roles())
+    def getMatchingRoles(self):
+        roles = list(self.cluster._ctx.local_roles())
         return roles
 
     def launchCluster(self):
         self.createClusterUtil()
 
     def getRootVolID(self):
+        instances = self.cluster._getNodesInCluster(nodeType=None, both=True)
+        instances.sort(key=lambda x: x.launch_time)
+        leader = instances[0]  # assume leader was launched first
+
         from boto.ec2.blockdevicemapping import BlockDeviceType
-        rootBlockDevice = self.leader.block_device_mapping["/dev/xvda"]
+        rootBlockDevice = leader.block_device_mapping["/dev/xvda"]
         assert isinstance(rootBlockDevice, BlockDeviceType)
         return rootBlockDevice.volume_id
 
@@ -128,14 +122,13 @@ class AbstractAWSAutoscaleTest(ToilTest):
         Does the work of the testing. Many features' test are thrown in here is no particular
         order
         """
-        from toil.provisioners.aws.awsProvisioner import AWSProvisioner
         self.launchCluster()
         # get the leader so we know the IP address - we don't need to wait since create cluster
         # already insures the leader is running
-        self.leader = AWSProvisioner._getLeader(wait=False, clusterName=self.clusterName)
-        ctx = AWSProvisioner._buildContext(self.clusterName)
+        self.cluster = clusterFactory(provisioner='aws', clusterName=self.clusterName)
+        self.leader = self.cluster.getLeader()
 
-        assert len(self.getMatchingRoles(self.clusterName)) == 1
+        assert len(self.getMatchingRoles()) == 1
         # --never-download prevents silent upgrades to pip, wheel and setuptools
         venv_command = ['virtualenv', '--system-site-packages', '--never-download',
                         '/home/venv']
@@ -166,7 +159,7 @@ class AbstractAWSAutoscaleTest(ToilTest):
 
         self._runScript(toilOptions)
 
-        assert len(self.getMatchingRoles(self.clusterName)) == 1
+        assert len(self.getMatchingRoles()) == 1
 
         checkStatsCommand = ['/home/venv/bin/python', '-c',
                              'import json; import os; '
@@ -178,14 +171,13 @@ class AbstractAWSAutoscaleTest(ToilTest):
 
         from boto.exception import EC2ResponseError
         volumeID = self.getRootVolID()
-        ctx = AWSProvisioner._buildContext(self.clusterName)
-        AWSProvisioner.destroyCluster(self.clusterName)
-        self.leader.update()
+        self.cluster.destroyCluster()
+        #self.leader.update()
         for attempt in range(6):
             # https://github.com/BD2KGenomics/toil/issues/1567
             # retry this for up to 1 minute until the volume disappears
             try:
-                ctx.ec2.get_all_volumes(volume_ids=[volumeID])
+                self.cluster._ctx.ec2.get_all_volumes(volume_ids=[volumeID])
                 time.sleep(10)
             except EC2ResponseError as e:
                 if e.status == 400 and 'InvalidVolume.NotFound' in e.code:
@@ -195,7 +187,7 @@ class AbstractAWSAutoscaleTest(ToilTest):
         else:
             self.fail('Volume with ID %s was not cleaned up properly' % volumeID)
 
-        assert len(self.getMatchingRoles(self.clusterName)) == 0
+        assert len(self.getMatchingRoles()) == 0
 
 
 @pytest.mark.timeout(1200)
@@ -235,8 +227,7 @@ class AWSAutoscaleTest(AbstractAWSAutoscaleTest):
         :return: volumeID
         """
         volumeID = super(AWSAutoscaleTest, self).getRootVolID()
-        ctx = AWSProvisioner._buildContext(self.clusterName)
-        rootVolume = ctx.ec2.get_all_volumes(volume_ids=[volumeID])[0]
+        rootVolume = self.cluster._ctx.ec2.get_all_volumes(volume_ids=[volumeID])[0]
         # test that the leader is given adequate storage
         self.assertGreaterEqual(rootVolume.size, self.requestedLeaderStorage)
         return volumeID
@@ -266,12 +257,13 @@ class AWSStaticAutoscaleTest(AWSAutoscaleTest):
         self.requestedNodeStorage = 20
 
     def launchCluster(self):
+        from toil.lib.ec2 import wait_instances_running
         from boto.ec2.blockdevicemapping import BlockDeviceType
         self.createClusterUtil(args=['--leaderStorage', str(self.requestedLeaderStorage),
                                      '--nodeTypes', ",".join(self.instanceTypes), '-w', ",".join(self.numWorkers), '--nodeStorage', str(self.requestedLeaderStorage)])
 
-        ctx = AWSProvisioner._buildContext(self.clusterName)
-        nodes = AWSProvisioner._getNodesInCluster(ctx, self.clusterName, both=True)
+        self.cluster = clusterFactory(provisioner='aws', clusterName=self.clusterName)
+        nodes = self.cluster._getNodesInCluster(both=True)
         nodes.sort(key=lambda x: x.launch_time)
         # assuming that leader is first
         workers = nodes[1:]
@@ -280,10 +272,10 @@ class AWSStaticAutoscaleTest(AWSAutoscaleTest):
         # test that workers have expected storage size
         # just use the first worker
         worker = workers[0]
-        worker = next(wait_instances_running(ctx.ec2, [worker]))
+        worker = next(wait_instances_running(self.cluster._ctx.ec2, [worker]))
         rootBlockDevice = worker.block_device_mapping["/dev/xvda"]
         self.assertTrue(isinstance(rootBlockDevice, BlockDeviceType))
-        rootVolume = ctx.ec2.get_all_volumes(volume_ids=[rootBlockDevice.volume_id])[0]
+        rootVolume = self.cluster._ctx.ec2.get_all_volumes(volume_ids=[rootBlockDevice.volume_id])[0]
         self.assertGreaterEqual(rootVolume.size, self.requestedNodeStorage)
 
     def _runScript(self, toilOptions):
@@ -362,7 +354,9 @@ class AWSRestartTest(AbstractAWSAutoscaleTest):
 
         script = dedent('\n'.join(getsource(restartScript).split('\n')[1:]))
         # use appliance ssh method instead of sshutil so we can specify input param
-        AWSProvisioner._sshAppliance(self.leader.ip_address, 'tee', self.scriptName, input=script)
+        cluster = clusterFactory(provisioner='aws', clusterName=self.clusterName)
+        leader = cluster.getLeader()
+        leader.sshAppliance('tee', self.scriptName, input=script)
 
     def _runScript(self, toilOptions):
         # clean = onSuccess
@@ -427,7 +421,9 @@ class PreemptableDeficitCompensationTest(AbstractAWSAutoscaleTest):
 
         script = dedent('\n'.join(getsource(userScript).split('\n')[1:]))
         # use appliance ssh method instead of sshutil so we can specify input param
-        AWSProvisioner._sshAppliance(self.leader.ip_address, 'tee', '/home/userScript.py', input=script)
+        cluster = clusterFactory(provisioner='aws', clusterName=self.clusterName)
+        leader = cluster.getLeader()
+        leader.sshAppliance('tee', '/home/userScript.py', input=script)
 
     def _runScript(self, toilOptions):
         toilOptions.extend([
