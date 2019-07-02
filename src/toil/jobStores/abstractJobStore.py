@@ -80,15 +80,24 @@ class ConcurrentFileModificationException(Exception):
 
 class NoSuchFileException(Exception):
     """Indicates that the specified file does not exist."""
-    def __init__(self, jobStoreFileID, customName=None):
+    def __init__(self, jobStoreFileID, customName=None, *extra):
         """
         :param str jobStoreFileID: the ID of the file that was mistakenly assumed to exist
         :param str customName: optionally, an alternate name for the nonexistent file
+        :param list extra: optional extra information to add to the error message
         """
+        # Having the extra argument may help resolve the __init__() takes at
+        # most three arguments error reported in
+        # https://github.com/DataBiosphere/toil/issues/2589#issuecomment-481912211
         if customName is None:
             message = "File '%s' does not exist." % jobStoreFileID
         else:
             message = "File '%s' (%s) does not exist." % (customName, jobStoreFileID)
+        
+        if extra:
+            # Append extra data.
+            message += " Extra info: " + " ".join((str(x) for x in extra))
+        
         super().__init__(message)
 
 
@@ -844,8 +853,12 @@ class AbstractJobStore(with_metaclass(ABCMeta, object)):
     @abstractmethod
     def readFile(self, jobStoreFileID, localFilePath, symlink=False):
         """
-        Copies the file referenced by jobStoreFileID to the given local file path. The version
-        will be consistent with the last copy of the file written/updated.
+        Copies or hard links the file referenced by jobStoreFileID to the given
+        local file path. The version will be consistent with the last copy of
+        the file written/updated. If the file in the job store is later
+        modified via updateFile or updateFileStream, it is
+        implementation-defined whether those writes will be visible at
+        localFilePath.
 
         The file at the given local path may not be modified after this method returns!
 
@@ -853,6 +866,9 @@ class AbstractJobStore(with_metaclass(ABCMeta, object)):
 
         :param str localFilePath: the local path indicating where to place the contents of the
                given file in the job store
+
+        :param bool symlink: whether the reader can tolerate a symlink. If set to true, the job
+               store may create a symlink instead of a full copy of the file or a hard link.
         """
         raise NotImplementedError()
 

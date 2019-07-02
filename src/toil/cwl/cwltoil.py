@@ -1112,22 +1112,40 @@ def main(args=None, stdout=sys.stdout):
         "--no-read-only", action="store_true", default=False,
         help="Do not set root directory in the container as read-only")
 
+    if args is None:
+        args = sys.argv[1:]
+
+    # Problem: we want to keep our job store somewhere auto-generated based on
+    # our options, unless overridden by... an option. So we will need to parse
+    # options twice, because we need to feed the parser the job store.
+    
+    # Propose a local workdir, probably under /tmp.
     # mkdtemp actually creates the directory, but
     # toil requires that the directory not exist,
+    # since it is going to be our jobstore,
     # so make it and delete it and allow
     # toil to create it again (!)
     workdir = tempfile.mkdtemp()
     os.rmdir(workdir)
 
-    if args is None:
-        args = sys.argv[1:]
-
-    # we use workdir as jobStore:
+    # we use workdir as default default jobStore:
     options = parser.parse_args([workdir] + args)
 
-    # if tmpdir_prefix is not the default value, set workDir too
+    # if tmpdir_prefix is not the default value, set workDir if unset, and move
+    # workdir and the job store under it
     if options.tmpdir_prefix != 'tmp':
-        options.workDir = options.tmpdir_prefix
+        workdir = tempfile.mkdtemp(dir=options.tmpdir_prefix)
+        os.rmdir(workdir)
+        # Re-parse arguments with the new default jobstore under the temp dir.
+        # It still might be overridden by a --jobStore option
+        options = parser.parse_args([workdir] + args)
+        if options.workDir is None:
+            # We need to override workDir because by default Toil will pick
+            # somewhere under the system temp directory if unset, ignoring
+            # --tmpdir-prefix.
+            #
+            # If set, workDir needs to exist, so we directly use the prefix
+            options.workDir = options.tmpdir_prefix
 
     if options.provisioner and not options.jobStore:
         raise NoSuchJobStoreException(
@@ -1186,24 +1204,11 @@ def main(args=None, stdout=sys.stdout):
                 cwltool.main.load_job_order(
                     options, sys.stdin, loading_context.fetcher_constructor,
                     loading_context.overrides_list, tool_file_uri)
-            document_loader, workflowobj, uri = \
-                cwltool.load_tool.fetch_document(
-                    uri, loading_context.resolver,
-                    loading_context.fetcher_constructor)
-            document_loader, avsc_names, processobj, metadata, uri = \
-                cwltool.load_tool.validate_document(
-                    document_loader, workflowobj, uri,
-                    loading_context.overrides_list,
-                    loading_context.metadata,
-                    loading_context.enable_dev, loading_context.strict, False,
-                    loading_context.fetcher_constructor, False,
-                    do_validate=loading_context.do_validate)
-            loading_context.overrides_list.extend(
-                metadata.get("cwltool:overrides", []))
+            loading_context, workflowobj, uri = cwltool.load_tool.fetch_document(uri, loading_context)
+            loading_context, uri = cwltool.load_tool.resolve_and_validate_document(loading_context, workflowobj, uri)
+            loading_context.overrides_list.extend(loading_context.metadata.get("cwltool:overrides", []))
             try:
-                tool = cwltool.load_tool.make_tool(
-                    document_loader, avsc_names, metadata, uri,
-                    loading_context)
+                tool = cwltool.load_tool.make_tool(uri, loading_context)
             except cwltool.process.UnsupportedRequirement as err:
                 logging.error(err)
                 return 33
@@ -1235,20 +1240,17 @@ def main(args=None, stdout=sys.stdout):
 
             for inp in tool.tool["inputs"]:
                 def set_secondary(fileobj):
-                    if isinstance(fileobj, Mapping) \
-                            and fileobj.get("class") == "File":
+                    if isinstance(fileobj, Mapping) and fileobj.get("class") == "File":
                         if "secondaryFiles" not in fileobj:
-                            fileobj["secondaryFiles"] = [
-                                {"location": cwltool.builder.substitute(
-                                    fileobj["location"], sf), "class": "File"}
-                                for sf in inp["secondaryFiles"]]
+                            fileobj["secondaryFiles"] = [{"location": cwltool.builder.substitute(fileobj["location"],
+                                                         sf["pattern"]), "class": "File"}
+                                                         for sf in inp["secondaryFiles"]]
 
                     if isinstance(fileobj, MutableSequence):
                         for entry in fileobj:
                             set_secondary(entry)
 
-                if shortname(inp["id"]) in initialized_job_order \
-                        and inp.get("secondaryFiles"):
+                if shortname(inp["id"]) in initialized_job_order and inp.get("secondaryFiles"):
                     set_secondary(initialized_job_order[shortname(inp["id"])])
 
             import_files(initialized_job_order)
