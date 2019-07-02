@@ -25,6 +25,7 @@ import json
 import tempfile
 import traceback
 import time
+import signal
 import socket
 import logging
 import shutil
@@ -32,13 +33,14 @@ from threading import Thread
 
 from toil.lib.expando import MagicExpando
 from toil.common import Toil, safeUnpickleFromStream
-from toil.fileStore import FileStore
+from toil.fileStores.abstractFileStore import AbstractFileStore
 from toil import logProcessContext
 from toil.job import Job
 from toil.lib.bioio import setLogLevel
 from toil.lib.bioio import getTotalCpuTime
 from toil.lib.bioio import getTotalCpuTimeAndMemoryUsage
-import signal
+from toil.deferred import DeferredFunctionManager
+
 
 logging.basicConfig()
 logger = logging.getLogger(__name__)
@@ -147,7 +149,7 @@ def workerScript(jobStore, config, jobName, jobStoreID, redirectOutputToLogFile=
             except OSError:
                 pass
             # Exit without doing any of Toil's cleanup
-            os._exit()
+            os._exit(0)
             
         # We don't need to reap the child. Either it kills us, or we finish
         # before it does. Either way, init will have to clean it up for us.
@@ -169,6 +171,9 @@ def workerScript(jobStore, config, jobName, jobStoreID, redirectOutputToLogFile=
                 sys.path.append(e)
 
     toilWorkflowDir = Toil.getWorkflowDir(config.workflowID, config.workDir)
+
+    # Connect to the deferred function system
+    deferredFunctionManager = DeferredFunctionManager(toilWorkflowDir)
     
     ##########################################
     #Setup the temporary directories.
@@ -319,16 +324,17 @@ def workerScript(jobStore, config, jobName, jobStoreID, redirectOutputToLogFile=
                     jobGraph.checkpoint = jobGraph.command
 
                 # Create a fileStore object for the job
-                fileStore = FileStore.createFileStore(jobStore, jobGraph, localWorkerTempDir, blockFn,
-                                                      caching=not config.disableCaching)
+                fileStore = AbstractFileStore.createFileStore(jobStore, jobGraph, localWorkerTempDir, blockFn,
+                                                              caching=not config.disableCaching)
                 with job._executor(jobGraph=jobGraph,
                                    stats=statsDict if config.stats else None,
                                    fileStore=fileStore):
-                    with fileStore.open(job):
-                        # Get the next block function and list that will contain any messages
-                        blockFn = fileStore._blockFn
+                    with deferredFunctionManager.open() as defer:
+                        with fileStore.open(job):
+                            # Get the next block function and list that will contain any messages
+                            blockFn = fileStore._blockFn
 
-                        job._runner(jobGraph=jobGraph, jobStore=jobStore, fileStore=fileStore)
+                            job._runner(jobGraph=jobGraph, jobStore=jobStore, fileStore=fileStore, defer=defer)
 
                 # Accumulate messages from this job & any subsequent chained jobs
                 statsDict.workers.logsToMaster += fileStore.loggingMessages
@@ -340,7 +346,7 @@ def workerScript(jobStore, config, jobName, jobStoreID, redirectOutputToLogFile=
                 logger.debug("No user job to run, so finishing")
                 break
             
-            if FileStore._terminateEvent.isSet():
+            if AbstractFileStore._terminateEvent.isSet():
                 raise RuntimeError("The termination flag is set")
 
             ##########################################
@@ -380,8 +386,8 @@ def workerScript(jobStore, config, jobName, jobStoreID, redirectOutputToLogFile=
             assert jobGraph.cores >= successorJobGraph.cores
             
             #Build a fileStore to update the job
-            fileStore = FileStore.createFileStore(jobStore, jobGraph, localWorkerTempDir, blockFn,
-                                                  caching=not config.disableCaching)
+            fileStore = AbstractFileStore.createFileStore(jobStore, jobGraph, localWorkerTempDir, blockFn,
+                                                          caching=not config.disableCaching)
 
             #Update blockFn
             blockFn = fileStore._blockFn
@@ -419,7 +425,7 @@ def workerScript(jobStore, config, jobName, jobStoreID, redirectOutputToLogFile=
     except: #Case that something goes wrong in worker
         traceback.print_exc()
         logger.error("Exiting the worker because of a failed job on host %s", socket.gethostname())
-        FileStore._terminateEvent.set()
+        AbstractFileStore._terminateEvent.set()
     
     ##########################################
     #Wait for the asynchronous chain of writes/updates to finish
@@ -432,7 +438,7 @@ def workerScript(jobStore, config, jobName, jobStoreID, redirectOutputToLogFile=
     #so safe to test if they completed okay
     ########################################## 
     
-    if FileStore._terminateEvent.isSet():
+    if AbstractFileStore._terminateEvent.isSet():
         jobGraph = jobStore.load(jobStoreID)
         jobGraph.setupJobAfterFailure(config)
         workerFailed = True
@@ -471,7 +477,7 @@ def workerScript(jobStore, config, jobName, jobStoreID, redirectOutputToLogFile=
 
     #Copy back the log file to the global dir, if needed
     if workerFailed and redirectOutputToLogFile:
-        jobGraph.logJobStoreFileID = jobStore.getEmptyFileStoreID(jobGraph.jobStoreID)
+        jobGraph.logJobStoreFileID = jobStore.getEmptyFileStoreID(jobGraph.jobStoreID, cleanup=True)
         jobGraph.chainedJobs = listOfJobs
         with jobStore.updateFileStream(jobGraph.logJobStoreFileID) as w:
             with open(tempWorkerLogPath, "r") as f:

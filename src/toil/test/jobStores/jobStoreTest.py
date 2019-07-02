@@ -50,7 +50,7 @@ from toil.lib.exceptions import panic
 from mock import patch
 
 from toil.common import Config, Toil
-from toil.fileStore import FileID
+from toil.fileStores import FileID
 from toil.job import Job, JobNode
 from toil.jobStores.abstractJobStore import (NoSuchJobException,
                                              NoSuchFileException)
@@ -63,6 +63,7 @@ from toil.test import (ToilTest,
                        needs_encryption,
                        make_tests,
                        needs_google,
+                       travis_test,
                        slow)
 from future.utils import with_metaclass
 
@@ -139,12 +140,14 @@ class AbstractJobStoreTest(object):
             self.jobstore_initialized.destroy()
             self.jobstore_resumed_noconfig.destroy()
             super(AbstractJobStoreTest.Test, self).tearDown()
-
+        
+        @travis_test
         def testInitialState(self):
             """Ensure proper handling of nonexistant files."""
             self.assertFalse(self.jobstore_initialized.exists('nonexistantFile'))
             self.assertRaises(NoSuchJobException, self.jobstore_initialized.load, 'nonexistantFile')
-
+        
+        @travis_test
         def testJobCreation(self):
             """
             Test creation of a job.
@@ -174,7 +177,8 @@ class AbstractJobStoreTest(object):
             self.assertEqual(job.predecessorNumber, 0)
             self.assertEqual(job.predecessorsFinished, set())
             self.assertEqual(job.logJobStoreFileID, None)
-
+        
+        @travis_test
         def testConfigEquality(self):
             """
             Ensure that the command line configurations are successfully loaded and stored.
@@ -187,7 +191,8 @@ class AbstractJobStoreTest(object):
             newJobStore.resume()
             self.assertEqual(newJobStore.config, self.config)
             self.assertIsNot(newJobStore.config, self.config)
-
+        
+        @travis_test
         def testJobLoadEquality(self):
             """Tests that a job loaded into one jobstore from another can be used equivalently by another."""
 
@@ -202,7 +207,8 @@ class AbstractJobStoreTest(object):
             job2 = self.jobstore_resumed_noconfig.load(job1.jobStoreID)
 
             self.assertEqual(job1, job2)
-
+        
+        @travis_test
         def testChildLoadingEquality(self):
             """Test that loading a child job operates as expected."""
             aJobNode = JobNode(command='parent1',
@@ -219,7 +225,8 @@ class AbstractJobStoreTest(object):
             job.stack.append(childJob)
             self.jobstore_initialized.update(job)
             self.assertEqual(self.jobstore_initialized.load(childJob.jobStoreID), childJob)
-
+        
+        @travis_test
         def testPersistantFilesToDelete(self):
             """
             Make sure that updating a job  carries over filesToDelete.
@@ -239,7 +246,8 @@ class AbstractJobStoreTest(object):
             job.filesToDelete = ['1', '2']
             self.jobstore_initialized.update(job)
             self.assertEqual(self.jobstore_initialized.load(job.jobStoreID).filesToDelete, ['1', '2'])
-
+        
+        @travis_test
         def testUpdateBehavior(self):
             """Tests the proper behavior during updating jobs."""
             jobstore1 = self.jobstore_initialized
@@ -273,7 +281,7 @@ class AbstractJobStoreTest(object):
 
             # Check equivalence between jobstore1 and jobstore2.
             # While job1 and job2 share a jobStoreID, job1 has not been "refreshed" to show the newly added child jobs.
-            self.assertNotEquals(job2, job1)
+            self.assertNotEqual(job2, job1)
 
             # Reload parent job on jobstore, "refreshing" the job.
             job1 = jobstore1.load(job1.jobStoreID)
@@ -284,7 +292,8 @@ class AbstractJobStoreTest(object):
             self.assertEqual(jobstore1.load(childJob2.jobStoreID), childJob2)
             self.assertEqual(job1,job2)            # The jobs should both have children now...
             self.assertIsNot(job1,job2)             # but should not be the same.
-
+        
+        @travis_test
         def testChangingJobStoreID(self):
             """
             Tests that changing the jobStoreID makes jobs unequivalent.
@@ -322,7 +331,7 @@ class AbstractJobStoreTest(object):
                 self.assertEqual(childJob, jobstore1.load(childJob.jobStoreID))
                 childJob.logJobStoreFileID = str(uuid.uuid4())
                 childJob.remainingRetryCount = 66
-                self.assertNotEquals(childJob, jobstore1.load(childJob.jobStoreID))
+                self.assertNotEqual(childJob, jobstore1.load(childJob.jobStoreID))
 
             # Update the children on the second jobstore.
             for childJob in parentJob2.stack:
@@ -332,7 +341,8 @@ class AbstractJobStoreTest(object):
             for childJob in parentJob2.stack:
                 self.assertEqual(jobstore1.load(childJob.jobStoreID), childJob)
                 self.assertEqual(jobstore2.load(childJob.jobStoreID), childJob)
-
+        
+        @travis_test
         def testJobDeletions(self):
             """Tests the consequences of deleting jobs."""
             # A local jobstore object for testing.
@@ -391,7 +401,8 @@ class AbstractJobStoreTest(object):
                 self.fail('Expecting NoSuchFileException')
             except NoSuchFileException:
                 pass
-
+       
+        @travis_test
         def testSharedFiles(self):
             """Tests the sharing of files."""
             jobstore1 = self.jobstore_initialized
@@ -414,7 +425,8 @@ class AbstractJobStoreTest(object):
                 f.write(bar)
             self.assertUrl(jobstore1.getSharedPublicUrl('nonEncrypted'))
             self.assertRaises(NoSuchFileException, jobstore1.getSharedPublicUrl, 'missing')
-
+       
+        @travis_test
         def testPerJobFiles(self):
             """Tests the behavior of files on jobs."""
             jobstore1 = self.jobstore_initialized
@@ -428,7 +440,7 @@ class AbstractJobStoreTest(object):
 
             # First recreate job
             jobOnJobStore1 = jobstore1.create(jobNodeOnJobStore1)
-            fileOne = jobstore2.getEmptyFileStoreID(jobOnJobStore1.jobStoreID)
+            fileOne = jobstore2.getEmptyFileStoreID(jobOnJobStore1.jobStoreID, cleanup=True)
             # Check file exists
             self.assertTrue(jobstore2.fileExists(fileOne))
             self.assertTrue(jobstore1.fileExists(fileOne))
@@ -463,7 +475,7 @@ class AbstractJobStoreTest(object):
                     f.truncate(0)
                     f.write(two)
                 # ... and create a second file from the local file.
-                fileTwo = jobstore1.writeFile(path, jobOnJobStore1.jobStoreID)
+                fileTwo = jobstore1.writeFile(path, jobOnJobStore1.jobStoreID, cleanup=True)
                 with jobstore2.readFileStream(fileTwo) as f:
                     self.assertEqual(f.read(), two)
                 # Now update the first file from the local file ...
@@ -473,7 +485,7 @@ class AbstractJobStoreTest(object):
             finally:
                 os.unlink(path)
             # Create a third file to test the last remaining method.
-            with jobstore2.writeFileStream(jobOnJobStore1.jobStoreID) as (f, fileThree):
+            with jobstore2.writeFileStream(jobOnJobStore1.jobStoreID, cleanup=True) as (f, fileThree):
                 f.write(three)
             with jobstore1.readFileStream(fileThree) as f:
                 self.assertEqual(f.read(), three)
@@ -491,7 +503,8 @@ class AbstractJobStoreTest(object):
                     self.fail('Expecting NoSuchFileException')
                 except NoSuchFileException:
                     pass
-
+        
+        @travis_test
         def testStatsAndLogging(self):
             """Tests behavior of reading and writting stats and logging."""
             jobstore1 = self.jobstore_initialized
@@ -550,7 +563,8 @@ class AbstractJobStoreTest(object):
             jobstore1.delete(jobOnJobStore1.jobStoreID)
             self.assertFalse(jobstore1.exists(jobOnJobStore1.jobStoreID))
             # TODO: Who deletes the shared files?
-
+       
+        @travis_test
         def testWriteLogFiles(self):
             """Test writing log files."""
             jobNames = ['testStatsAndLogging_writeLogFiles']
@@ -564,7 +578,8 @@ class AbstractJobStoreTest(object):
             with open(jobLogFile, 'r') as f:
                 self.assertEqual(f.read(), 'string\nbytes\n\nnewline\n')
             os.remove(jobLogFile)
-
+       
+        @travis_test
         def testBatchCreate(self):
             """Test creation of many jobs."""
             jobstore = self.jobstore_initialized
@@ -579,7 +594,8 @@ class AbstractJobStoreTest(object):
                     jobGraphs.append(jobstore.create(overlargeJobNode))
             for jobGraph in jobGraphs:
                 self.assertTrue(jobstore.exists(jobGraph.jobStoreID))
-
+       
+        @travis_test
         def testGrowingAndShrinkingJob(self):
             """Make sure jobs update correctly if they grow/shrink."""
             # Make some very large data, large enough to trigger
@@ -725,7 +741,8 @@ class AbstractJobStoreTest(object):
             make_tests(testImportSharedFile,
                        cls,
                        otherCls=activeTestClassesByName)
-
+       
+        @travis_test
         def testImportHttpFile(self):
             '''Test importing a file over HTTP.'''
             http = socketserver.TCPServer(('', 0), StubHttpRequestHandler)
@@ -748,7 +765,8 @@ class AbstractJobStoreTest(object):
                     httpThread.join()
             finally:
                 http.server_close()
-
+       
+        @travis_test
         def testImportFtpFile(self):
             '''Test importing a file over FTP'''
             ftpfile = {'name': 'foo', 'content': 'foo bar baz qux'}
@@ -777,7 +795,7 @@ class AbstractJobStoreTest(object):
             n = self._batchDeletionSize()
             for numFiles in (1, n - 1, n, n + 1, 2 * n):
                 job = self.jobstore_initialized.create(self.arbitraryJob)
-                fileIDs = [self.jobstore_initialized.getEmptyFileStoreID(job.jobStoreID) for _ in range(0, numFiles)]
+                fileIDs = [self.jobstore_initialized.getEmptyFileStoreID(job.jobStoreID, cleanup=True) for _ in range(0, numFiles)]
                 self.jobstore_initialized.delete(job.jobStoreID)
                 for fileID in fileIDs:
                     # NB: the fooStream() methods return context managers
@@ -816,7 +834,7 @@ class AbstractJobStoreTest(object):
                 checksumThread.start()
                 try:
                     with open(random_device, 'rb') as readable:
-                        with self.jobstore_initialized.writeFileStream(job.jobStoreID) as (writable, fileId):
+                        with self.jobstore_initialized.writeFileStream(job.jobStoreID, cleanup=True) as (writable, fileId):
                             for i in range(int(partSize * partsPerFile / bufSize)):
                                 buf = readable.read(bufSize)
                                 checksumQueue.put(buf)
@@ -847,7 +865,7 @@ class AbstractJobStoreTest(object):
                                 buf = readable.read(bufSize)
                                 writable.write(buf)
                                 checksum.update(buf)
-                    fileId = self.jobstore_initialized.writeFile(path, job.jobStoreID)
+                    fileId = self.jobstore_initialized.writeFile(path, job.jobStoreID, cleanup=True)
                 finally:
                     os.unlink(path)
                 before = checksum.hexdigest()
@@ -863,14 +881,15 @@ class AbstractJobStoreTest(object):
                 after = checksum.hexdigest()
                 self.assertEqual(before, after)
             self.jobstore_initialized.delete(job.jobStoreID)
-
+        
+        @travis_test
         def testZeroLengthFiles(self):
             '''Test reading and writing of empty files.'''
             job = self.jobstore_initialized.create(self.arbitraryJob)
-            nullFile = self.jobstore_initialized.writeFile('/dev/null', job.jobStoreID)
+            nullFile = self.jobstore_initialized.writeFile('/dev/null', job.jobStoreID, cleanup=True)
             with self.jobstore_initialized.readFileStream(nullFile) as f:
                 assert not f.read()
-            with self.jobstore_initialized.writeFileStream(job.jobStoreID) as (f, nullStream):
+            with self.jobstore_initialized.writeFileStream(job.jobStoreID, cleanup=True) as (f, nullStream):
                 pass
             with self.jobstore_initialized.readFileStream(nullStream) as f:
                 assert not f.read()
@@ -891,7 +910,7 @@ class AbstractJobStoreTest(object):
 
             # Load the file into a jobstore.
             job = self.jobstore_initialized.create(self.arbitraryJob)
-            jobStoreFileID = self.jobstore_initialized.writeFile(filePath, job.jobStoreID)
+            jobStoreFileID = self.jobstore_initialized.writeFile(filePath, job.jobStoreID, cleanup=True)
 
             # Remove the local file.
             os.unlink(filePath)
@@ -940,6 +959,9 @@ class AbstractJobStoreTest(object):
 
             noCacheTime = noCacheEnd - noCacheStart
 
+            # Make sure we have all the jobs: root and children.
+            self.assertEqual(len(list(jobstore.jobs())), 101)
+
             # See how long it takes to clean with cache
             jobCache = {jobGraph.jobStoreID: jobGraph
                         for jobGraph in jobstore.jobs()}
@@ -954,37 +976,16 @@ class AbstractJobStoreTest(object):
             # Running with the cache should be faster.
             self.assertTrue(cacheTime <= noCacheTime)
 
-        @skip("too slow")  # This takes a long time on the remote JobStores
-        def testManyJobs(self):
-            # Make sure we can store large numbers of jobs
-
-            # Make a bunch of jobs
-            jobstore = self.jobstore_initialized
-
-            # Create parent job
-            rootJob = jobstore.createRootJob(self.arbitraryJob)
-
-            # Create a bunch of child jobs
-            for i in range(3000):
-                child = jobstore.create(self.arbitraryJob)
-                rootJob.stack.append(child)
-            jobstore.update(rootJob)
-
-            # Pull them all back out again
-            allJobs = list(jobstore.jobs())
-
-            # Make sure we have the right number of jobs. Cannot be precise because of limitations
-            # on the jobs iterator for certain cloud providers
-            self.assertTrue(len(allJobs) <= 3001)
-
+       
         # NB: the 'thread' method seems to be needed here to actually
         # ensure the timeout is raised, probably because the only
         # "live" thread doesn't hold the GIL.
+        @travis_test
         @pytest.mark.timeout(45, method='thread')
         def testPartialReadFromStream(self):
             """Test whether readFileStream will deadlock on a partial read."""
             job = self.jobstore_initialized.create(self.arbitraryJob)
-            with self.jobstore_initialized.writeFileStream(job.jobStoreID) as (f, fileID):
+            with self.jobstore_initialized.writeFileStream(job.jobStoreID, cleanup=True) as (f, fileID):
                 # Write enough data to make sure the writer thread
                 # will get blocked on the write. Technically anything
                 # greater than the pipe buffer size plus the libc
@@ -1013,7 +1014,8 @@ class AbstractJobStoreTest(object):
             jobstore = self._createJobStore()
             jobstore.destroy()
             # Note that self.jobstore_initialized.destroy() is done as part of shutdown
-
+       
+        @travis_test
         def testDestructionIdempotence(self):
             # Jobstore is fully initialized
             self.jobstore_initialized.destroy()
@@ -1025,7 +1027,8 @@ class AbstractJobStoreTest(object):
             self.jobstore_initialized.destroy()
             cleaner = self._createJobStore()
             cleaner.destroy()
-
+        
+        @travis_test
         def testEmptyFileStoreIDIsReadable(self):
             """Simply creates an empty fileStoreID and attempts to read from it."""
             id = self.jobstore_initialized.getEmptyFileStoreID()
@@ -1108,7 +1111,9 @@ class AbstractEncryptedJobStoreTest(object):
 
 class FileJobStoreTest(AbstractJobStoreTest.Test):
     def _createJobStore(self):
-        return FileJobStore(self.namePrefix)
+        # Make a FileJobStore with an artificially low fan out threshold, to
+        # make sure to test fan out logic
+        return FileJobStore(self.namePrefix, fanOut=2)
 
     def _corruptJobStore(self):
         assert isinstance(self.jobstore_initialized, FileJobStore)  # type hint
@@ -1138,14 +1143,15 @@ class FileJobStoreTest(AbstractJobStoreTest.Test):
 
     def _cleanUpExternalStore(self, dirPath):
         shutil.rmtree(dirPath)
-
+    
+    @travis_test
     def testPreserveFileName(self):
         "Check that the fileID ends with the given file name."
         fh, path = tempfile.mkstemp()
         try:
             os.close(fh)
             job = self.jobstore_initialized.create(self.arbitraryJob)
-            fileID = self.jobstore_initialized.writeFile(path, job.jobStoreID)
+            fileID = self.jobstore_initialized.writeFile(path, job.jobStoreID, cleanup=True)
             self.assertTrue(fileID.endswith(os.path.basename(path)))
         finally:
             os.unlink(path)
@@ -1451,28 +1457,12 @@ class InvalidAzureJobStoreTest(ToilTest):
                           AzureJobStore,
                           'toiltest:a_b')
 
-@needs_aws
-@needs_encryption
-@slow
-class EncryptedAWSJobStoreTest(AWSJobStoreTest, AbstractEncryptedJobStoreTest.Test):
-    pass
 
-
-@needs_azure
-@needs_encryption
-@slow
-class EncryptedAzureJobStoreTest(AzureJobStoreTest, AbstractEncryptedJobStoreTest.Test):
-    pass
-
-# TODO: Has this ever actually run?  Duplicates the AzureJobstore Testing needlessly while
-# claiming to be the google jobstore.
-
-# @needs_google
-# @needs_encryption
-# @slow
-# class EncryptedGoogleJobStoreTest(AzureJobStoreTest, AbstractEncryptedJobStoreTest.Test):
-#     pass
-
+@needs_aws	
+@needs_encryption	
+@slow	
+class EncryptedAWSJobStoreTest(AWSJobStoreTest, AbstractEncryptedJobStoreTest.Test):	
+    pass	
 
 class StubHttpRequestHandler(SimpleHTTPServer.SimpleHTTPRequestHandler):
     fileContents = 'A good programmer looks both ways before crossing a one-way street'
