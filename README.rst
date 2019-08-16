@@ -1,3 +1,10 @@
+Toil-ionox0
+
+This is ian johnson's fork of DataBiosphere Toil package with in progress fixes for lsf and CWL at MSKCC.
+
+Releases are made off of `ij/toil-ionox0` branch and are hosted on pypi at https://pypi.org/project/toil-ionox0/ starting from 0.0.1
+ 
+
 ATTENTION: Toil has moved from https://github.com/BD2KGenomics/toil to https://github.com/DataBiosphere/toil as of July 5th, 2018.
 
 Toil is a scalable, efficient, cross-platform (Linux & macOS) pipeline management system,
