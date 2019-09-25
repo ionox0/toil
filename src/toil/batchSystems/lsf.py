@@ -117,7 +117,7 @@ class LSFBatchSystem(AbstractGridEngineBatchSystem):
                     logger.error("bjobs detected job failed for job: "
                                  "{}".format(job))
                     return 1
-                elif line.find("Started on ") > -1:
+                elif line.find("Started on ") > -1 or re.search('Started \d* Task', line):
                     started = 1
 
             if started == 1:
