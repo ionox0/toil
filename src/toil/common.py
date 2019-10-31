@@ -361,6 +361,9 @@ def _addOptions(addGroupFn, config):
     addOptionFn = addGroupFn("toil options for specifying the batch system",
                              "Allows the specification of the batch system, and arguments to the "
                              "batch system/big batch system (see below).")
+    addOptionFn("--statePollingWait", dest="statePollingWait", default=1,
+                help=("Time, in seconds, to wait before doing a scheduler query for job state. "
+                      "Return cached results if within the waiting period."))
     addBatchOptions(addOptionFn, config)
 
     #
@@ -456,10 +459,6 @@ def _addOptions(addGroupFn, config):
         addOptionFn("--deadlockWait", dest="deadlockWait", default=None,
                     help=(
                     "The minimum number of seconds to observe the cluster stuck running only the same service jobs before throwing a deadlock exception. default=%s" % config.deadlockWait))
-        addOptionFn("--statePollingWait", dest="statePollingWait", default=1,
-                    help=("Time, in seconds, to wait before doing a scheduler query for job state. "
-                          "Return cached results if within the waiting period."))
-
     #
     # Resource requirements
     #
